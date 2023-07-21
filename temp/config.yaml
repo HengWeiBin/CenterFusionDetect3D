@@ -1,0 +1,31 @@
+PROJECT_NAME: VitTwFoodTransferResume
+CUDNN:
+  BENCHMARK: False
+  ENABLED: True
+GPUS: [0, 1]
+MIXED_PRECISION: False
+DATASET:
+  NAME: TWFood101
+  ROOT: ../tw_food_101/
+  TEST_SET: 'tw_food_101_test_list.csv'
+  TRAIN_SET: 'tw_food_101_train.csv'
+  NUM_CLASSES: 101
+  WORKERS: 8
+TRAIN:
+  IMAGE_SIZE:
+  - 518
+  - 518
+  SHUFFLE: True
+  BATCH_SIZE_PER_GPU: [2]
+  EPOCH: [10]
+  LR: [0.00001]
+  RESUME: True
+  DATA_AUG: True
+  PRETRAINED_MODEL: 'runs/train/VitTwFoodTransfer/checkpoints/best.pt'
+TEST:
+  IMAGE_SIZE:
+  - 518
+  - 518
+  SHUFFLE: False
+  BATCH_SIZE_PER_GPU: 128
+  DATA_AUG: False
