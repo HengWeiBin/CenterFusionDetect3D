@@ -1,59 +1,76 @@
+NAME: CenterFusion
 CUDNN:
   BENCHMARK: true
   DETERMINISTIC: false
   ENABLED: true
-GPUS: (0,)
-OUTPUT_DIR: 'output'
-LOG_DIR: 'log'
-WORKERS: 8
-PRINT_FREQ: 10
+GPUS:                           # -1 for CPU
+- 0
+WORKERS: 4
+DEBUG: 0
+EVAL: false                     # only evaluate the val split and quit
+RANDOM_SEED: 0
 
 DATASET:
-  DATASET: oilpollution
+  DATASET: 'nuscenes'           # currently support nuscenes only
   ROOT: data/
-  TEST_SET: 'list/oilpollution/val.lst'
-  TRAIN_SET: 'list/oilpollution/train.lst'
-  NUM_CLASSES: 6
+  RANDOM_CROP: false            # random crop data augmentation from CornerNet
+  MAX_CROP: true                # used when the training dataset has inbalanced aspect ratios
+  SHIFT: 0.2                    # shift augmentation
+  SCALE: 0                      # scale augmentation
+  ROTATE: 0                     # rotation augmentation
+  FILP: 0.5                     # flip augmentation
+  COLOR_AUG: true               # color augmenation from CornerNet
+  NUSCENES:
+    POINTCLOUD: true            # use radar point cloud
+    TRAIN_SPLIT: 'train'        # ['train','mini_train']
+    VAL_SPLIT: 'mini_val'       # ['val','mini_val','test']
+    MAX_PC: 1000                # maximum number of points in the point cloud
+    MAX_PC_DIST: 60.0           # remove points beyond max_pc_dist (meters)
+    PC_Z_OFFSET: 0.0            # raise all Radar points in z direction
+    PILLAR_DIMS: '1.5,0.2,0.2'  # Radar pillar dimensions (h,w,l) TODO:FAKE aug to be fixed
+
 MODEL:
-  NAME: pidnet_large
-  NUM_OUTPUTS: 2
-  PRETRAINED: "pretrained_models/imagenet/PIDNet_L_ImageNet.pth.tar"
+  LOAD_DIR: ''
+  ARCH: "dla_34"                # model architecture
+  FREEZE_BACKBONE: false        # freeze the backbone network and only train heads
+  FUSION_STRATEGY: 'middle' # TODO
+  GENERIC_NET:
+    BACKBONE: "dla34"
+    NECK: "dlaup"
+
 LOSS:
-  USE_OHEM: true
-  OHEMTHRES: 0.9
-  OHEMKEEP: 131072
-  BALANCE_WEIGHTS: [0.4, 1.0]
-  SB_WEIGHTS: 1.0
+  REG_LOSS: 'l1'                # regression loss: sl1 | l1 | l2
+  NUSCENES_ATT: true
+  VELOCITY: true
+  WEIGHT:
+    HEATMAP: 1                  # keypoint heatmaps
+    OFFSET: 1                   # keypoint local offsets
+    BBOX: 0.1                   # bounding box size
+    DEPTH: 1                    # depthloss weight for depth
+    DIMENTION: 1                # 3d bounding box size
+    ROTATION: 1                 # orientation
+    NUSCENES_ATT: 1             # nuscenes attribute
+    VELOCITY: 1                 # velocity
+
 TRAIN:
   IMAGE_SIZE:
-  - 512
-  - 1024
-  BASE_SIZE: 2048
-  BATCH_SIZE_PER_GPU: 32
-  SHUFFLE: true
-  BEGIN_EPOCH: 0
-  END_EPOCH: 175
+  - 448 # TODO: 500 in paper
+  - 800
+  BATCH_SIZE: 26
+  SHUFFLE: true                 # shuffle training dataloader
+  EPOCH: 60
   RESUME: false
-  OPTIMIZER: sgd
-  LR: 0.01
-  WD: 0.0005
-  MOMENTUM: 0.9
-  NESTEROV: false
-  FLIP: true
-  MULTI_SCALE: true
-  IGNORE_LABEL: 255
+  OPTIMIZER: adam
+  LR: 2.5e-4
+  LR_STEP: 50                   # drop learning rate step
+  SAVE_POINT: 20,40,50          # save model at these epochs
+  VAL_INTERVALS: 10             # number of epochs to run validation
   SCALE_FACTOR: 16
-  HSV_AUG: true
-  MBA_AUG: true
+
 TEST:
   IMAGE_SIZE:
-  - 1024
-  - 2048
-  BASE_SIZE: 2048
-  BATCH_SIZE_PER_GPU: 1
-  FLIP_TEST: false
-  MULTI_SCALE: false
-  MODEL_FILE: ''
-  OUTPUT_INDEX: 1
-  HSV_AUG: false
-  MBA_AUG: false
+  - 488 # TODO: 500 in paper
+  - 800 
+  BATCH_SIZE: 1 # TODO: there is a bug in official code, batch size cannot be larger
+  K: 100                        # max number of output objects
+  FOCAL_LENGTH: -1              # -1 use default focal length
