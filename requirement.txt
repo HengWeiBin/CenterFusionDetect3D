@@ -1,2 +1,7 @@
 yacs
 numpy
+pycocotools
+opencv-python
+tqdm
+nuscenes-devkit
+pyquaternion
