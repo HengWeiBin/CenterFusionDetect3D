@@ -20,14 +20,15 @@ DATASET:
   ROTATE: 0                       # rotation augmentation
   FLIP: 0.5                       # flip augmentation
   COLOR_AUG: true                 # color augmenation from CornerNet
-  TRAIN_SPLIT: 'mini_train'            # ['train','mini_train']
+  TRAIN_SPLIT: 'mini_train'       # ['train','mini_train']
   VAL_SPLIT: 'mini_val'           # ['val','mini_val','test']
   NUSCENES:
     RADAR_PC: true                # use radar point cloud
     MAX_PC: 1000                  # maximum number of points in the point cloud
     MAX_PC_DIST: 60.0             # remove points beyond max_pc_dist (meters)
     PC_Z_OFFSET: 0.0              # raise all Radar points in z direction
-    PILLAR_DIMS: (1.5, 0.2, 0.2)  # Radar pillar dimensions (h,w,l) TODO:FAKE aug to be fixed
+    PC_ROI_METHOD: 'pillars'      # pillars or heatmap
+    PILLAR_DIMS: (1.5, 0.2, 0.2)  # Radar pillar dimensions (h,w,l)
 
 MODEL:
   LOAD_DIR: ''
