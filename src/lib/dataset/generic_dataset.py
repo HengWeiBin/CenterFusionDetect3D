@@ -25,13 +25,12 @@ from utils.pointcloud import (
     cvtPcDepthToHeatmap,
 )
 from utils.pointcloud import RadarPointCloudWithVelocity as RadarPointCloud
-from utils.ddd import get3dBox, project3DPoints
+from utils.ddd import get3dBox, project3DPoints, draw3DBox
 from utils.image import getGaussianRadius
 
 # from utils.image import flip, color_aug
 # from utils.image import affine_transform
 # from utils.pointcloud import map_pointcloud_to_image, pc_dep_to_hm
-# from utils.pointcloud import RadarPointCloudWithVelocity as RadarPointCloud
 # from nuscenes.utils.data_classes import Box
 # from pyquaternion import Quaternion
 # from nuscenes.utils.geometry_utils import view_points
@@ -46,7 +45,6 @@ class GenericDataset(torch.utils.data.Dataset):
     class_ids = None
     max_objs = None
     focalLength = 1200
-    # num_joints = 17
     flip_idx = [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12], [13, 14], [15, 16]]
     edges = [
         [0, 1],
@@ -73,7 +71,7 @@ class GenericDataset(torch.utils.data.Dataset):
     # change these vectors to actual mean and std to normalize
     pc_mean = np.zeros((18, 1))
     pc_std = np.ones((18, 1))
-    img_ind = 0
+    imgDebugIndex = 0
 
     def __init__(
         self, config=None, split=None, ann_path=None, img_dir=None, device=None
@@ -160,7 +158,7 @@ class GenericDataset(torch.utils.data.Dataset):
         )
         if self.config.DATASET.MAX_CROP:
             scale = max(img_info["height"], img_info["width"]) * 1.0
-        else:
+        else: 
             scale = np.array([img_info["width"], img_info["height"]], dtype=np.float32)
         if "calib" in img_info:
             calib = np.array(img_info["calib"], dtype=np.float32)
@@ -174,7 +172,7 @@ class GenericDataset(torch.utils.data.Dataset):
             )
 
         # ====== data augmentation for training set (image) ====== #
-        scaleFactor, rotateFactor, isFliped = 1, 0, True
+        scaleFactor, rotateFactor, isFliped = 1, 0, False
         if "train" in self.split:
             center, scaleFactor, rotateFactor = self.getAugmentParam(
                 center, scale, img_info["width"], img_info["height"]
@@ -188,16 +186,20 @@ class GenericDataset(torch.utils.data.Dataset):
         # ====== Get the affine transformation matrix ====== #
         transMatInput = getAffineTransform(
             center,
-            scaleFactor,
+            scale,
             rotateFactor,
             [self.config.MODEL.INPUT_SIZE[1], self.config.MODEL.INPUT_SIZE[0]],
         )
         transMatOutput = getAffineTransform(
             center,
-            scaleFactor,
+            scale,
             rotateFactor,
             [self.config.MODEL.OUTPUT_SIZE[1], self.config.MODEL.OUTPUT_SIZE[0]],
         )
+        item = {
+            "image": self.transformInput(img, transMatInput),
+            "calib": calib,
+        }
 
         # ====== Load Radar Point Cloud ====== #
         if self.config.DATASET.NUSCENES.RADAR_PC:
@@ -209,10 +211,6 @@ class GenericDataset(torch.utils.data.Dataset):
             )
 
         # ====== Initialize the return variables ====== #
-        item = {
-            "image": self.transformInput(img, transMatInput),
-            "calib": calib,
-        }
         target = {"bboxes": [], "scores": [], "classIds": [], "centers": []}
         self.initReturn(item, target)
         num_objs = min(len(anns), self.max_objs)
@@ -241,7 +239,7 @@ class GenericDataset(torch.utils.data.Dataset):
 
         # ====== Debug ====== #
         if self.config.DEBUG > 0 or self.enable_meta:
-            target = self._format_gt_det(target)
+            target = self._format_gt_det(target)  # TODO: check and delete
 
             # get velocity transformation matrix
             if "velocity_trans_matrix" in img_info:
@@ -267,7 +265,17 @@ class GenericDataset(torch.utils.data.Dataset):
 
         return item
 
-    def get_default_calib(self, width, height):
+    def getDefaultCalib(self, width, height):
+        """
+        Get the default camera matrix.
+
+        Args:
+            width (int): image width
+            height (int): image height
+
+        Returns:
+            np.array: default camera matrix
+        """
         return np.array(
             [
                 [self.focalLength, 0, width / 2, 0],
@@ -277,6 +285,16 @@ class GenericDataset(torch.utils.data.Dataset):
         )
 
     def loadImageAnnotation(self, img_id, img_dir):
+        """
+        Get the image, annotations, image info and image path.
+
+        Args:
+            img_id (int): image id
+            img_dir (str): image directory
+
+        Returns:
+            tuple: image, annotations, image info and image path
+        """
         img_info = self.coco.loadImgs(ids=[img_id])[0]
         file_name = img_info["file_name"]
         img_path = os.path.join(img_dir, file_name)
@@ -353,7 +371,7 @@ class GenericDataset(torch.utils.data.Dataset):
         """
         This function flips the annotations horizontally.
         It does this by flipping the bounding boxes, the rotation angles,
-        the amodel centers, and the velocities
+        the amodal centers, and the velocities
 
         Args:
             anns (list): A list of annotations.
@@ -373,9 +391,8 @@ class GenericDataset(torch.utils.data.Dataset):
                     else -np.pi - anns[k]["alpha"]
                 )
 
-            # TODO: nannotation typo amodel -> amodal
-            if "amodal_offset" in self.config.heads and "amodel_center" in anns[k]:
-                anns[k]["amodel_center"][0] = width - anns[k]["amodel_center"][0] - 1
+            if "amodal_offset" in self.config.heads and "amodal_center" in anns[k]:
+                anns[k]["amodal_center"][0] = width - anns[k]["amodal_center"][0] - 1
 
             if self.config.LOSS.VELOCITY and "velocity" in anns[k]:
                 anns[k]["velocity"][0] *= -1
@@ -393,29 +410,30 @@ class GenericDataset(torch.utils.data.Dataset):
         Returns:
             [CxHxW] transformed image
         """
-        # t1 = timer()
         result = cv2.warpAffine(
             img,
             transformMat,
             (self.config.MODEL.OUTPUT_SIZE[1], self.config.MODEL.OUTPUT_SIZE[0]),
             flags=cv2.INTER_LINEAR,
         )
-        # t2 = timer()
-
         result = result.astype(np.float32) / 255.0
         result = result.transpose(2, 0, 1)
         result = torch.from_numpy(result).to(self.device)
         if "train" in self.split and self.config.DATASET.COLOR_AUG:
-            # t3 = timer()
             result = self.colorAugmentor(result)
-            # t4 = timer()
-        # t5 = timer()
-        # print('\n' + f'warpAffine: {(t2 - t1) * 1000:.1f}ms')
-        # print(f'color_aug: {(t4 - t3) * 1000:.1f}ms')
-        # print(f'other: {(t5 - t4) * 1000:.1f}ms')
         return result
 
     def initReturn(self, item, target):
+        """
+        Initialize the return dictionary
+
+        Args:
+            item (dict): The dictionary to be returned.
+            target (dict): The dictionary containing the annotations.
+
+        Returns:
+            None
+        """
         item["heatmap"] = np.zeros(
             (
                 self.num_categories,
@@ -550,11 +568,12 @@ class GenericDataset(torch.utils.data.Dataset):
             [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32
         )
         center_int = center.astype(np.int32)
+
         item["classIds"][k] = classId
         item["mask"][k] = 1
         if "widthHeight" in item:
             item["widthHeight"][k] = float(width), float(height)
-            item["wh_mask"][k] = 1
+            item["widthHeight_mask"][k] = 1
         item["index"][k] = (
             center_int[1] * self.config.MODEL.OUTPUT_SIZE[1] + center_int[0]
         )
@@ -591,7 +610,18 @@ class GenericDataset(torch.utils.data.Dataset):
             target["velocity"].append(item["velocity"][k])
 
         if "rotation" in self.config.heads:
-            self._add_rot(item, ann, k, target)
+            if "alpha" in ann:
+                item["rot_mask"][k] = 1
+                alpha = ann["alpha"]
+                if alpha < np.pi / 6.0 or alpha > 5 * np.pi / 6.0:
+                    item["rotbin"][k, 0] = 1
+                    item["rotres"][k, 0] = alpha - (-0.5 * np.pi)
+                if alpha > -np.pi / 6.0 or alpha < -5 * np.pi / 6.0:
+                    item["rotbin"][k, 1] = 1
+                    item["rotres"][k, 1] = alpha - (0.5 * np.pi)
+                target["rotation"].append(self.processAlpha(ann["alpha"]))
+            else:
+                target["rotation"].append(self.processAlpha(0))
 
         if "depth" in self.config.heads and "depth" in ann:
             item["depth"][k] = ann["depth"] * scaleFactor
@@ -608,19 +638,15 @@ class GenericDataset(torch.utils.data.Dataset):
 
         if "amodal_offset" in self.config.heads:
             if "amodal_center" in ann:
-                amodel_center = affineTransform(ann["amodal_center"], transMatOutput)
-                item["amodal_offset"][k] = amodel_center - center_int
+                amodal_center = affineTransform(ann["amodal_center"], transMatOutput)
+                item["amodal_offset"][k] = amodal_center - center_int
                 item["amodal_offset_mask"][k] = 1
                 target["amodal_offset"].append(item["amodal_offset"][k])
             else:
                 target["amodal_offset"].append([0, 0])
 
         if self.config.DATASET.NUSCENES.RADAR_PC:
-            if self.opt.disable_frustum:
-                item["pc_hm"] = item["pc_dep"]
-                # normalize depth
-                item["pc_hm"][0] /= self.config.DATASET.NUSCENES.MAX_PC_DIST
-            else:
+            if self.config.MODEL.FRUSTUM:
                 distanceThreshold = getDistanceThresh(
                     item["calib"], center, ann["dim"], ann["alpha"]
                 )
@@ -632,22 +658,21 @@ class GenericDataset(torch.utils.data.Dataset):
                     distanceThreshold,
                     self.config.DATASET.NUSCENES.MAX_PC_DIST,
                 )
+            else:
+                item["pc_hm"] = item["pc_dep"]
+                # normalize depth
+                item["pc_hm"][0] /= self.config.DATASET.NUSCENES.MAX_PC_DIST
 
-    def _add_rot(self, ret, ann, k, gt_det):
-        if "alpha" in ann:
-            ret["rot_mask"][k] = 1
-            alpha = ann["alpha"]
-            if alpha < np.pi / 6.0 or alpha > 5 * np.pi / 6.0:
-                ret["rotbin"][k, 0] = 1
-                ret["rotres"][k, 0] = alpha - (-0.5 * np.pi)
-            if alpha > -np.pi / 6.0 or alpha < -5 * np.pi / 6.0:
-                ret["rotbin"][k, 1] = 1
-                ret["rotres"][k, 1] = alpha - (0.5 * np.pi)
-            gt_det["rot"].append(self._alpha_to_8(ann["alpha"]))
-        else:
-            gt_det["rot"].append(self._alpha_to_8(0))
+    def processAlpha(self, alpha):
+        """
+        Convert alpha to eight bins.
 
-    def _alpha_to_8(self, alpha):
+        Args:
+            alpha: alpha angle
+
+        Returns:
+            ret(list): eight bins
+        """
         ret = [0, 0, 0, 1, 0, 0, 0, 1]
         if alpha < np.pi / 6.0 or alpha > 5 * np.pi / 6.0:
             r = alpha - (-0.5 * np.pi)
@@ -666,10 +691,7 @@ class GenericDataset(torch.utils.data.Dataset):
                 "scores": np.array([1], dtype=np.float32),
                 "classIds": np.array([0], dtype=np.float32),
                 "centers": np.array([[0, 0]], dtype=np.float32),
-                "pre_cts": np.array([[0, 0]], dtype=np.float32),
-                "tracking": np.array([[0, 0]], dtype=np.float32),
                 "bboxes_amodal": np.array([[0, 0]], dtype=np.float32),
-                "hps": np.zeros((1, 17, 2), dtype=np.float32),
             }
         gt_det = {k: np.array(gt_det[k], dtype=np.float32) for k in gt_det}
         return gt_det
@@ -714,7 +736,7 @@ class GenericDataset(torch.utils.data.Dataset):
         all_radar_pcs = RadarPointCloud(np.zeros((18, 0)))
         for radar_channel in self.RADARS_FOR_CAMERA[sensor_name]:
             radar_pcs, _ = RadarPointCloud.from_file_multisweep(
-                self.nusc, sample, radar_channel, sensor_name, self.NUM_SWEEPS
+                self.nusc, sample, radar_channel, sensor_name, 6
             )
             all_radar_pcs.points = np.hstack((all_radar_pcs.points, radar_pcs.points))
         radar_pc = all_radar_pcs.points
@@ -760,10 +782,10 @@ class GenericDataset(torch.utils.data.Dataset):
         pc_N = np.array(pc_2d.shape[1])
 
         # pad point clouds with zero to avoid size mismatch error in dataloader
-        n_points = min(self.opt.max_pc, pc_2d.shape[1])
-        pc_z = np.zeros((pc_2d.shape[0], self.opt.max_pc))
+        n_points = min(self.config.DATASET.NUSCENES.MAX_PC, pc_2d.shape[1])
+        pc_z = np.zeros((pc_2d.shape[0], self.config.DATASET.NUSCENES.MAX_PC))
         pc_z[:, :n_points] = pc_2d[:, :n_points]
-        pc_3dz = np.zeros((pc_3d.shape[0], self.opt.max_pc))
+        pc_3dz = np.zeros((pc_3d.shape[0], self.config.DATASET.NUSCENES.MAX_PC))
         pc_3dz[:, :n_points] = pc_3d[:, :n_points]
 
         return pc_z, pc_N, pc_dep, pc_3dz
@@ -944,186 +966,197 @@ class GenericDataset(torch.utils.data.Dataset):
             pillar_wh[0, i] = bbox[2] - bbox[0]
             pillar_wh[1, i] = bbox[3] - bbox[1]
 
+        # TODO remove from these function
         ## DEBUG #################################################################
-        if self.opt.debug:  # TODO
-            img_2d = img.copy()
-            img_2d_inp = cv2.warpAffine(
+        if self.config.DEBUG:
+            inputHeight, inputWidth = (
+                self.config.MODEL.INPUT_SIZE[0],
+                self.config.MODEL.INPUT_SIZE[1],
+            )
+            outputHeight, outputWidth = (
+                self.config.MODEL.OUTPUT_SIZE[0],
+                self.config.MODEL.OUTPUT_SIZE[1],
+            )
+
+            imgOrigin = img.copy()
+
+            imgInput2D = cv2.warpAffine(
                 img,
                 transMatInput,
-                (self.opt.input_w, self.opt.input_h),
+                (inputWidth, inputHeight),
                 flags=cv2.INTER_LINEAR,
             )
-            img_2d_out = cv2.warpAffine(
+            imgOutput2D = cv2.warpAffine(
                 img,
                 transMatOutput,
-                (self.opt.output_w, self.opt.output_h),
+                (outputWidth, outputHeight),
                 flags=cv2.INTER_LINEAR,
             )
-            img_3d = cv2.warpAffine(
+            imgInput3D = cv2.warpAffine(
                 img,
                 transMatInput,
-                (self.opt.input_w, self.opt.input_h),
+                (inputWidth, inputHeight),
                 flags=cv2.INTER_LINEAR,
             )
-            blank_image = 255 * np.ones(
-                (self.opt.input_h, self.opt.input_w, 3), np.uint8
-            )
-            mask = np.zeros(img_2d.shape[:2], np.uint8)
-            overlay = img_2d_inp.copy()
-            origin_overlay = img.copy()
 
-            pc_inp, _ = self.transformPointCloud(
-                pc_2d, transMatInput, self.opt.input_w, self.opt.input_h
+            inputMask = 255 * np.ones((inputHeight, inputWidth, 3), np.uint8)
+            originMask = np.zeros(imgOrigin.shape[:2], np.uint8)
+            imgOverlayInput = imgInput2D.copy()
+            imgOverlayOrigin = img.copy()
+
+            pcInput, _ = self.transformPointCloud(
+                pc_2d, transMatInput, inputWidth, inputHeight
             )
-            pc_inp = pc_inp[:3, :].T
-            pc_out, _ = self.transformPointCloud(
-                pc_2d, transMatOutput, self.opt.output_w, self.opt.output_h
+            pcInput = pcInput[:3, :].T
+            pcOutput, _ = self.transformPointCloud(
+                pc_2d, transMatOutput, outputWidth, outputHeight
             )
 
-            pill_wh_inp = pillar_wh * (self.opt.input_w / self.opt.output_w)
-            pill_wh_out = pillar_wh
-            pill_wh_ori = pill_wh_inp * 2
+            pillarInputWh = pillar_wh * (inputWidth / outputWidth)
+            pillarOutputWh = pillar_wh
+            pillarOriginWh = pillarInputWh * 2
 
-            # for i, p in reversed(list(enumerate(pc_inp[:3, :].T))):
-            for i in range(len(pc_inp) - 1, -1, -1):
-                p = pc_inp[i]
-                color = int((p[2].tolist() / 60.0) * 255)
+            for i in range(len(pcInput) - 1, -1, -1):
+                point = pcInput[i]
+                color = int((point[2] / 60.0) * 255)
                 color = (0, color, 0)
 
-                rect_tl = (
-                    np.min(int(p[0] - pill_wh_inp[0, i] / 2), 0),
-                    np.min(int(p[1] - pill_wh_inp[1, i]), 0),
+                # Draw pillar box on input image
+                pillarTopLInput = (
+                    np.min(int(point[0] - pillarInputWh[0, i] / 2), 0),
+                    np.min(int(point[1] - pillarInputWh[1, i]), 0),
                 )
-                rect_br = (np.min(int(p[0] + pill_wh_inp[0, i] / 2), 0), int(p[1]))
-                cv2.rectangle(
-                    img_2d_inp, rect_tl, rect_br, (0, 0, 255), 1, lineType=cv2.LINE_AA
-                )
-                img_2d_inp = cv2.circle(
-                    img_2d_inp, (int(p[0]), int(p[1])), 3, color, -1
-                )
-
-                # On original-sized image
-                rect_tl_ori = (
-                    np.min(int(pc_2d[0, i] - pill_wh_ori[0, i] / 2), 0),
-                    np.min(int(pc_2d[1, i] - pill_wh_ori[1, i]), 0),
-                )
-                rect_br_ori = (
-                    np.min(int(pc_2d[0, i] + pill_wh_ori[0, i] / 2), 0),
-                    int(pc_2d[1, i]),
+                pillarBotRInput = (
+                    np.min(int(point[0] + pillarInputWh[0, i] / 2), 0),
+                    int(point[1]),
                 )
                 cv2.rectangle(
-                    img_2d,
-                    rect_tl_ori,
-                    rect_br_ori,
+                    imgInput2D,
+                    pillarTopLInput,
+                    pillarBotRInput,
                     (0, 0, 255),
-                    2,
+                    1,
                     lineType=cv2.LINE_AA,
                 )
-                img_2d = cv2.circle(
-                    img_2d, (int(pc_2d[0, i]), int(pc_2d[1, i])), 6, color, -1
+
+                # Draw radar point on input image
+                imgInput2D = cv2.circle(
+                    imgInput2D, (int(point[0]), int(point[1])), 3, color, -1
                 )
 
-                p2 = pc_out[:3, i].T
-                rect_tl2 = (
-                    np.min(int(p2[0] - pill_wh_out[0, i] / 2), 0),
-                    np.min(int(p2[1] - pill_wh_out[1, i]), 0),
+                # Draw pillar box on original image
+                pillarTopLOrigin = (
+                    np.min(int(pc_2d[0, i] - pillarOriginWh[0, i] / 2), 0),
+                    np.min(int(pc_2d[1, i] - pillarOriginWh[1, i]), 0),
                 )
-                rect_br2 = (np.min(int(p2[0] + pill_wh_out[0, i] / 2), 0), int(p2[1]))
-                cv2.rectangle(
-                    img_2d_out, rect_tl2, rect_br2, (0, 0, 255), 1, lineType=cv2.LINE_AA
+                pillarBotROrigin = (
+                    np.min(int(pc_2d[0, i] + pillarOriginWh[0, i] / 2), 0),
+                    int(pc_2d[1, i]),
                 )
-                img_2d_out = cv2.circle(
-                    img_2d_out, (int(p[0]), int(p[1])), 3, (255, 0, 0), -1
+                # cv2.rectangle(
+                #     imgOrigin,
+                #     pillarTopLOrigin,
+                #     pillarBotROrigin,
+                #     (0, 0, 255),
+                #     2,
+                #     lineType=cv2.LINE_AA,
+                # )
+
+                # Draw radar point on original image
+                imgOrigin = cv2.circle(
+                    imgOrigin, (int(pc_2d[0, i]), int(pc_2d[1, i])), 6, color, -1
                 )
 
-                # on blank image
-                cv2.rectangle(
-                    blank_image, rect_tl, rect_br, color, -1, lineType=cv2.LINE_AA
+                # Draw pillar box on output image
+                p2 = pcOutput[:3, i].T
+                pillarTopLOutput = (
+                    np.min(int(p2[0] - pillarOutputWh[0, i] / 2), 0),
+                    np.min(int(p2[1] - pillarOutputWh[1, i]), 0),
                 )
-                mask[
-                    rect_tl_ori[1] : rect_br_ori[1], rect_tl_ori[0] : rect_br_ori[0]
+                pillarBotROutput = (
+                    np.min(int(p2[0] + pillarOutputWh[0, i] / 2), 0),
+                    int(p2[1]),
+                )
+                cv2.rectangle(
+                    imgOutput2D,
+                    pillarTopLOutput,
+                    pillarBotROutput,
+                    (0, 0, 255),
+                    1,
+                    lineType=cv2.LINE_AA,
+                )
+
+                # Draw radar point on output image
+                imgOutput2D = cv2.circle(
+                    imgOutput2D, (int(point[0]), int(point[1])), 3, (255, 0, 0), -1
+                )
+
+                # Draw pillar box on blank image
+                cv2.rectangle(
+                    inputMask,
+                    pillarTopLInput,
+                    pillarBotRInput,
+                    color,
+                    -1,
+                    lineType=cv2.LINE_AA,
+                )
+                originMask[
+                    pillarTopLOrigin[1] : pillarBotROrigin[1],
+                    pillarTopLOrigin[0] : pillarBotROrigin[0],
                 ] = color[1]
 
                 # plot 3d pillars
-                img_3d = draw_box_3d(
-                    img_3d,
+                imgInput3D = draw3DBox(
+                    imgInput3D,
                     boxesInput2D[i].astype(np.int32),
                     [114, 159, 207],
                     same_color=False,
                 )
 
-                # overlay
+                # Overlay pillar mask on input image
                 cv2.rectangle(
-                    overlay, rect_tl, rect_br, color, -1, lineType=cv2.LINE_AA
-                )
-                cv2.rectangle(
-                    origin_overlay,
-                    rect_tl_ori,
-                    rect_br_ori,
+                    imgOverlayInput,
+                    pillarTopLInput,
+                    pillarBotRInput,
                     color,
                     -1,
                     lineType=cv2.LINE_AA,
                 )
 
-            cv2.imwrite(
-                (
-                    self.opt.debug_dir + "/{}pc_pillar_2d_inp." + self.opt.img_format
-                ).format(self.img_ind),
-                img_2d_inp,
-            )
-            cv2.imwrite(
-                (
-                    self.opt.debug_dir + "/{}pc_pillar_2d_ori." + self.opt.img_format
-                ).format(self.img_ind),
-                img_2d,
-            )
-            cv2.imwrite(
-                (
-                    self.opt.debug_dir + "/{}pc_pillar_2d_out." + self.opt.img_format
-                ).format(self.img_ind),
-                img_2d_out,
-            )
-            cv2.imwrite(
-                (
-                    self.opt.debug_dir + "/{}pc_pillar_2d_blank." + self.opt.img_format
-                ).format(self.img_ind),
-                blank_image,
-            )
-            cv2.imwrite(
-                (
-                    self.opt.debug_dir
-                    + "/{}pc_pillar_2d_ori_overlay."
-                    + self.opt.img_format
-                ).format(self.img_ind),
-                origin_overlay,
-            )
-            cv2.imwrite(
-                (
-                    self.opt.debug_dir
-                    + "/{}pc_pillar_2d_overlay."
-                    + self.opt.img_format
-                ).format(self.img_ind),
-                overlay,
-            )
-            cv2.imwrite(
-                (self.opt.debug_dir + "/{}pc_pillar_3d." + self.opt.img_format).format(
-                    self.img_ind
-                ),
-                img_3d,
-            )
-            cv2.imwrite(
-                (
-                    self.opt.debug_dir + "/{}pc_pillar_mask." + self.opt.img_format
-                ).format(self.img_ind),
-                mask,
-            )
-            cv2.imwrite(
-                (self.opt.debug_dir + "/{}img." + self.opt.img_format).format(
-                    self.img_ind
-                ),
-                img,
-            )
-            self.img_ind += 1
+                # Overlay pillar mask on original image
+                cv2.rectangle(
+                    imgOverlayOrigin,
+                    pillarTopLOrigin,
+                    pillarBotROrigin,
+                    color,
+                    -1,
+                    lineType=cv2.LINE_AA,
+                )
+
+            # ==================== Output ====================
+            debugDir = os.path.join(self.config.OUTPUT_DIR, "debug")
+            outputFunc = cv2.imshow
+            if self.config.DEBUG > 1:
+                if not os.path.exists(debugDir):
+                    os.makedirs(debugDir)
+                outputFunc = lambda n, img: cv2.imwrite(n, img) and cv2.imshow(n, img)
+
+            dirHead = os.path.join(debugDir, f"{self.imgDebugIndex}_")
+            outputFunc(f"{dirHead}pillarInput2D.jpg", imgInput2D)
+            outputFunc(f"{dirHead}pillarOrigin2D.jpg", imgOrigin)
+            outputFunc(f"{dirHead}pillarOutput2D.jpg", imgOutput2D)
+            outputFunc(f"{dirHead}pillarInputOverlay.jpg", imgOverlayInput)
+            outputFunc(f"{dirHead}pillarOriginOverlay.jpg", imgOverlayOrigin)
+            outputFunc(f"{dirHead}pillarInput3D.jpg", imgInput3D)
+            outputFunc(f"{dirHead}pillarInputMask2D.jpg", inputMask)
+            outputFunc(f"{dirHead}pillarOriginMask.jpg", originMask)
+            outputFunc(f"{dirHead}imgOrigin.jpg", img)
+            self.imgDebugIndex += 1
+
+            key = cv2.waitKey(0)
+            cv2.destroyAllWindows()
+            if key == 27:
+                exit()
         ## DEBUG #################################################################
 
         return pillar_wh

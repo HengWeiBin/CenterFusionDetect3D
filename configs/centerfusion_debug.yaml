@@ -1,0 +1,76 @@
+NAME: CenterFusionDebug
+CUDNN:
+  BENCHMARK: true
+  DETERMINISTIC: false
+  ENABLED: true
+GPUS:                             # -1 for CPU
+- 0
+WORKERS: 0
+DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save debug images
+EVAL: false                       # only evaluate the val split and quit
+RANDOM_SEED: 123
+
+DATASET:
+  DATASET: 'nuscenes'             # currently support nuscenes only
+  ROOT: data/
+  RANDOM_CROP: false              # random crop data augmentation from CornerNet
+  MAX_CROP: true                  # used when the training dataset has inbalanced aspect ratios
+  SHIFT: 0.                      # shift augmentation
+  SCALE: 0                        # scale augmentation
+  ROTATE: 0                       # rotation augmentation
+  FLIP: 0.5                       # flip augmentation
+  COLOR_AUG: true                 # color augmenation from CornerNet
+  TRAIN_SPLIT: 'mini_train'       # ['train','mini_train']
+  VAL_SPLIT: 'mini_val'           # ['val','mini_val','test']
+  NUSCENES:
+    RADAR_PC: true                # use radar point cloud
+    MAX_PC: 1000                  # maximum number of points in the point cloud
+    MAX_PC_DIST: 60.0             # remove points beyond max_pc_dist (meters)
+    PC_Z_OFFSET: 0.0              # raise all Radar points in z direction
+    PC_ROI_METHOD: 'pillars'      # pillars or heatmap
+    PILLAR_DIMS: (1.5, 0.2, 0.2)  # Radar pillar dimensions (h,w,l)
+
+MODEL:
+  LOAD_DIR: ''
+  ARCH: "dla_34"                  # model architecture
+  FREEZE_BACKBONE: false          # freeze the backbone network and only train heads
+  FUSION_STRATEGY: 'middle' # TODO
+  INPUT_SIZE: (488, 800)
+  FRUSTUM: true                   # Enable frustum association
+  GENERIC_NET:
+    BACKBONE: "dla34"
+    NECK: "dlaup"
+  DLA:
+    NODE: "DeformConv"            # [DeformConv | GlobalConv | Conv]
+
+LOSS:
+  REG_LOSS: 'l1'                  # regression loss: sl1 | l1 | l2
+  NUSCENES_ATT: true
+  VELOCITY: true
+  WEIGHTS:
+    HEATMAP: 1                    # keypoint heatmaps
+    AMODAL_OFFSET: 1              # keypoint local offsets
+    BBOX: 0.1                     # bounding box size
+    DEPTH: 1                      # depthloss weight for depth
+    DIMENSION: 1                  # 3d bounding box size
+    ROTATION: 1                   # orientation
+    NUSCENES_ATT: 1               # nuscenes attribute
+    VELOCITY: 1                   # velocity
+
+TRAIN:
+  BATCH_SIZE: 4
+  SHUFFLE: true                   # shuffle training dataloader
+  EPOCHS: 60
+  RESUME: false
+  OPTIMIZER: adam
+  LR: 2.5e-4
+  LR_STEP: (50,)                  # drop learning rate step
+  SAVE_POINT: 20,40,50            # save model at these epochs
+  VAL_INTERVALS: 10               # number of epochs to run validation
+  SCALE_FACTOR: 16
+
+TEST:
+  BATCH_SIZE: 1 # TODO: there is a bug in official code, batch size cannot be larger
+  K: 100                          # max number of output objects
+  FOCAL_LENGTH: -1                # -1 use default focal length
+  OFFICIAL_EVAL: true             # use official evaluation script

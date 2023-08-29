@@ -1,4 +1,4 @@
-NAME: CenterFusionTemplate
+NAME: CenterFusion_Template
 CUDNN:
   BENCHMARK: true
   DETERMINISTIC: false
@@ -6,7 +6,7 @@ CUDNN:
 GPUS:                             # -1 for CPU
 - 0
 WORKERS: 4
-DEBUG: 0
+DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save debug images
 EVAL: false                       # only evaluate the val split and quit
 RANDOM_SEED: 0
 
@@ -36,6 +36,7 @@ MODEL:
   FREEZE_BACKBONE: false          # freeze the backbone network and only train heads
   FUSION_STRATEGY: 'middle' # TODO
   INPUT_SIZE: (488, 800)
+  FRUSTUM: true                   # Enable frustum association
   GENERIC_NET:
     BACKBONE: "dla34"
     NECK: "dlaup"
@@ -46,7 +47,7 @@ LOSS:
   VELOCITY: true
   WEIGHTS:
     HEATMAP: 1                    # keypoint heatmaps
-    AMODAL_OFFSET: 1                     # keypoint local offsets
+    AMODAL_OFFSET: 1              # keypoint local offsets
     BBOX: 0.1                     # bounding box size
     DEPTH: 1                      # depthloss weight for depth
     DIMENSION: 1                  # 3d bounding box size

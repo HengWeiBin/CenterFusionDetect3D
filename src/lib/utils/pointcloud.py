@@ -7,13 +7,13 @@ from nuscenes.utils.geometry_utils import view_points, transform_matrix
 from nuscenes.utils.data_classes import RadarPointCloud
 from functools import reduce
 from typing import Tuple, Dict
-from model.utils import _topk, _tranpose_and_gather_feat
 import os.path as osp
 import torch
 import timeit
-
 import numpy as np
 from pyquaternion import Quaternion
+
+from model.utils import topk, transposeAndGetFeature
 
 
 def map_pointcloud_to_image(pc, cam_intrinsic, img_shape=(1600, 900)):
@@ -206,14 +206,26 @@ def get_alpha(rot):
     return alpha
 
 
-def alpha2rot_y(alpha, x, cx, fx):
+def cvtAlphaToRotateY(alpha, objCenterX, imgCenterX, focalLength):
     """
     Get rotation_y by alpha + theta - 180
-    alpha : Observation angle of object, ranging [-pi..pi]
-    x : Object center x to the camera center (x-W/2), in pixels
-    rotation_y : Rotation ry around Y-axis in camera coordinates [-pi..pi]
+
+    Args:
+        alpha : Observation angle of object, ranging [-pi..pi]
+        objCenterX : Object center x to the camera center (x-W/2), in pixels
+        imgCenterX: image center x, in pixels
+        focalLength: Camera focal length x, in pixels
+
+    Return:
+        rotation_y : Rotation ry around Y-axis in camera coordinates [-pi..pi]
     """
-    rot_y = alpha + torch.atan2(x - cx, fx)
+    if all(
+        isinstance(arg, torch.Tensor) for arg in [objCenterX, imgCenterX, focalLength]
+    ):
+        rot_y = alpha + torch.atan2(objCenterX - imgCenterX, focalLength)
+    else:
+        rot_y = alpha + np.arctan2(objCenterX - imgCenterX, focalLength)
+
     if rot_y > 3.14159:
         rot_y -= 2 * 3.14159
     if rot_y < -3.14159:
@@ -221,24 +233,35 @@ def alpha2rot_y(alpha, x, cx, fx):
     return rot_y
 
 
-def comput_corners_3d(dim, rotation_y):
-    # dim: 3
-    # location: 3
-    # rotation_y: 1
-    # return: 8 x 3
-    c, s = torch.cos(rotation_y), torch.sin(rotation_y)
-    R = torch.tensor([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=torch.float32)
+def get3DCorners(dim, rotation_y):
+    """
+    Get 3D bounding box corners from its parameterization.
+
+    Args:
+        dim: 3D object dimensions [l, w, h]
+        rotation_y: Rotation ry around Y-axis in camera coordinates [-pi..pi]
+
+    Return:
+        corners_3d: 3D bounding box corners [8, 3]
+    """
+    if isinstance(rotation_y, torch.Tensor):
+        lib, matmul, toArray = torch, torch.mm, torch.tensor
+    else:
+        lib, matmul, toArray = np, np.dot, np.array
+
+    c, s = lib.cos(rotation_y), lib.sin(rotation_y)
+    R = toArray([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=lib.float32)
     l, w, h = dim[2], dim[1], dim[0]
     x_corners = [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2]
     y_corners = [0, 0, 0, 0, -h, -h, -h, -h]
     z_corners = [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2]
 
-    corners = torch.tensor([x_corners, y_corners, z_corners], dtype=torch.float32)
-    corners_3d = torch.mm(R, corners).transpose(1, 0)
+    corners = toArray([x_corners, y_corners, z_corners], dtype=lib.float32)
+    corners_3d = matmul(R, corners).transpose(1, 0)
     return corners_3d
 
 
-def getDistanceThresh(calib, ct, dim, alpha):
+def getDistanceThresh(calib, center, dim, alpha):
     """
     Get the distance threshold for the object.
 
@@ -251,219 +274,153 @@ def getDistanceThresh(calib, ct, dim, alpha):
     Returns:
         The distance threshold for the object.
     """
-    rotation_y = alpha2rot_y(alpha, ct[0], calib[0, 2], calib[0, 0])
-    corners_3d = comput_corners_3d(dim, rotation_y)
+    rotation_y = cvtAlphaToRotateY(alpha, center[0], calib[0, 2], calib[0, 0])
+    corners_3d = get3DCorners(dim, rotation_y)
     dist_thresh = max(corners_3d[:, 2]) - min(corners_3d[:, 2]) / 2.0
     return dist_thresh
 
 
-def generate_pc_hm(output, pc_dep, calib, opt):
-    K = opt.K
-    # K = 100
-    heat = output["hm"]
-    wh = output["wh"]
+def getPcFrustumHeatmap(output, pc_dep, calib, config):
+    """
+    Generate point cloud heatmap from the frustum association
+
+    Args:
+        output: model output
+        pc_dep: point cloud depth feature map [depth, vel_x, vel_z]
+        calib: calibration matrix
+        config: config / options
+    """
+    K = config.TEST.K
+    heatmap = output["heatmap"]
+    widthHeight = output["widthHeight"]
     pc_hm = torch.zeros_like(pc_dep)
 
-    batch, cat, height, width = heat.size()
-    scores, inds, clses, ys0, xs0 = _topk(heat, K=K)
-    xs = xs0.view(batch, K, 1) + 0.5
-    ys = ys0.view(batch, K, 1) + 0.5
-
-    ## Initialize pc_feats
-    pc_feats = torch.zeros(
-        (batch, len(opt.pc_feat_lvl), height, width), device=heat.device
-    )
-    dep_ind = opt.pc_feat_channels["pc_dep"]
-    vx_ind = opt.pc_feat_channels["pc_vx"]
-    vz_ind = opt.pc_feat_channels["pc_vz"]
-    to_log = opt.sigmoid_dep_sec
+    batch, nClass, _, _ = heatmap.size()
+    _, indices, classes, ys, xs = topk(heatmap, K=K)
+    xs = xs.view(batch, K, 1) + 0.5
+    ys = ys.view(batch, K, 1) + 0.5
 
     ## get estimated depths
-    out_dep = 1.0 / (output["dep"].sigmoid() + 1e-6) - 1.0
-    dep = _tranpose_and_gather_feat(out_dep, inds)  # B x K x (C)
-    if dep.size(2) == cat:
-        cats = clses.view(batch, K, 1, 1)
+    out_dep = 1.0 / (output["depth"].sigmoid() + 1e-6) - 1.0
+    dep = transposeAndGetFeature(out_dep, indices)  # B x K x (C)
+    if dep.size(2) == nClass:
+        classes_ = classes.view(batch, K, 1, 1)
         dep = dep.view(batch, K, -1, 1)  # B x K x C x 1
-        dep = dep.gather(2, cats.long()).squeeze(2)  # B x K x 1
+        dep = dep.gather(2, classes_.long()).squeeze(2)  # B x K x 1
 
-    ## get top bounding boxes
-    wh = _tranpose_and_gather_feat(wh, inds)  # B x K x 2
-    wh = wh.view(batch, K, 2)
-    wh[wh < 0] = 0
-    if wh.size(2) == 2 * cat:  # cat spec
-        wh = wh.view(batch, K, -1, 2)
-        cats = clses.view(batch, K, 1, 1).expand(batch, K, 1, 2)
-        wh = wh.gather(2, cats.long()).squeeze(2)  # B x K x 2
+    # get topk bounding boxes
+    widthHeight = transposeAndGetFeature(widthHeight, indices)  # B x K x 2
+    widthHeight = widthHeight.view(batch, K, 2)
+    widthHeight[widthHeight < 0] = 0
+    if widthHeight.size(2) == 2 * nClass:
+        widthHeight = widthHeight.view(batch, K, -1, 2)
+        classes_ = classes.view(batch, K, 1, 1).expand(batch, K, 1, 2)
+        widthHeight = widthHeight.gather(2, classes_.long()).squeeze(2)  # B x K x 2
     bboxes = torch.cat(
         [
-            xs - wh[..., 0:1] / 2,
-            ys - wh[..., 1:2] / 2,
-            xs + wh[..., 0:1] / 2,
-            ys + wh[..., 1:2] / 2,
+            xs - widthHeight[..., 0:1] / 2,
+            ys - widthHeight[..., 1:2] / 2,
+            xs + widthHeight[..., 0:1] / 2,
+            ys + widthHeight[..., 1:2] / 2,
         ],
         dim=2,
     )  # B x K x 4
 
-    ## get dimensions
-    dims = _tranpose_and_gather_feat(output["dim"], inds).view(batch, K, -1)
+    # get dimensions and rotation
+    dims = transposeAndGetFeature(output["dim"], indices).view(batch, K, -1)
+    rot = transposeAndGetFeature(output["rot"], indices).view(batch, K, -1)
 
-    ## get rotation
-    rot = _tranpose_and_gather_feat(output["rot"], inds).view(batch, K, -1)
-
-    ## Calculate values for the new pc_hm
-    clses = clses.cpu().numpy()
-
+    # Draw heatmap
     for i, [pc_dep_b, bboxes_b, depth_b, dim_b, rot_b] in enumerate(
         zip(pc_dep, bboxes, dep, dims, rot)
     ):
         alpha_b = get_alpha(rot_b).unsqueeze(1)
 
-        if opt.sort_det_by_dist:
-            idx = torch.argsort(depth_b[:, 0])
-            bboxes_b = bboxes_b[idx, :]
-            depth_b = depth_b[idx, :]
-            dim_b = dim_b[idx, :]
-            rot_b = rot_b[idx, :]
-            alpha_b = alpha_b[idx, :]
-
-        for j, [bbox, depth, dim, alpha] in enumerate(
-            zip(bboxes_b, depth_b, dim_b, alpha_b)
-        ):
-            clss = clses[i, j].tolist()
-            ct = torch.tensor(
+        for bbox, depth, dim, alpha in zip(bboxes_b, depth_b, dim_b, alpha_b):
+            center = torch.tensor(
                 [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2],
                 device=pc_dep_b.device,
             )
-            dist_thresh = get_dist_thresh(calib, ct, dim, alpha)
-            dist_thresh += dist_thresh * opt.frustumExpansionRatio
-            pc_dep_to_hm_torch(pc_hm[i], pc_dep_b, depth, bbox, dist_thresh, opt)
+            distanceThreshold = getDistanceThresh(calib, center, dim, alpha)
+            cvtPcDepthToHeatmap(
+                pc_hm[i],
+                pc_dep_b,
+                depth,
+                bbox,
+                distanceThreshold,
+                config.DATASET.NUSCENES.MAX_PC_DIST,
+            )
     return pc_hm
 
 
-def pc_dep_to_hm_torch(pc_hm, pc_dep, dep, bbox, dist_thresh, opt):
-    if isinstance(dep, list) and len(dep) > 0:
-        dep = dep[0]
-    ct = torch.tensor(
-        [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=torch.float32
-    )
-    bbox_int = torch.tensor(
-        [
-            torch.floor(bbox[0]),
-            torch.floor(bbox[1]),
-            torch.ceil(bbox[2]),
-            torch.ceil(bbox[3]),
-        ]
-    )  # format: xyxy
-    bbox_int = bbox_int.type(torch.int32)
-
-    roi = pc_dep[:, bbox_int[1] : bbox_int[3] + 1, bbox_int[0] : bbox_int[2] + 1]
-    pc_dep = roi[opt.pc_feat_channels["pc_dep"]]
-    pc_vx = roi[opt.pc_feat_channels["pc_vx"]]
-    pc_vz = roi[opt.pc_feat_channels["pc_vz"]]
-
-    pc_dep.sum().data
-    nonzero_inds = torch.nonzero(pc_dep, as_tuple=True)
-
-    if len(nonzero_inds) and len(nonzero_inds[0]) > 0:
-        #   nonzero_pc_dep = torch.exp(-pc_dep[nonzero_inds])
-        nonzero_pc_dep = pc_dep[nonzero_inds]
-        nonzero_pc_vx = pc_vx[nonzero_inds]
-        nonzero_pc_vz = pc_vz[nonzero_inds]
-
-        ## Get points within dist threshold
-        within_thresh = (nonzero_pc_dep < dep + dist_thresh) & (
-            nonzero_pc_dep > max(0, dep - dist_thresh)
-        )
-        pc_dep_match = nonzero_pc_dep[within_thresh]
-        pc_vx_match = nonzero_pc_vx[within_thresh]
-        pc_vz_match = nonzero_pc_vz[within_thresh]
-
-        if len(pc_dep_match) > 0:
-            arg_min = torch.argmin(pc_dep_match)
-            dist = pc_dep_match[arg_min]
-            vx = pc_vx_match[arg_min]
-            vz = pc_vz_match[arg_min]
-            if opt.normalize_depth:
-                dist /= opt.max_pc_dist
-
-            w = bbox[2] - bbox[0]
-            w_interval = opt.hm_to_box_ratio * (w)
-            w_min = int(ct[0] - w_interval / 2.0)
-            w_max = int(ct[0] + w_interval / 2.0)
-
-            h = bbox[3] - bbox[1]
-            h_interval = opt.hm_to_box_ratio * (h)
-            h_min = int(ct[1] - h_interval / 2.0)
-            h_max = int(ct[1] + h_interval / 2.0)
-
-            pc_hm[
-                opt.pc_feat_channels["pc_dep"], h_min : h_max + 1, w_min : w_max + 1 + 1
-            ] = dist
-            pc_hm[
-                opt.pc_feat_channels["pc_vx"], h_min : h_max + 1, w_min : w_max + 1 + 1
-            ] = vx
-            pc_hm[
-                opt.pc_feat_channels["pc_vz"], h_min : h_max + 1, w_min : w_max + 1 + 1
-            ] = vz
-
-
-def cvtPcDepthToHeatmap(pc_hm, pc_dep, dep, bbox, distanceThreshold, max_pc_dist):
+def cvtPcDepthToHeatmap(pc_hm, pc_dep, depth, bbox, distanceThreshold, max_pc_dist):
     """
-    Convert point cloud depth feature map to heatmap
+    Frustum Association: Filter point cloud depth feature map and convert to heatmap
 
     Args:
-        pc_hm: point cloud heatmap (output)
+        pc_hm: draw a single-depth-value rectangle that is smaller than the bounding box (output)
         pc_dep: point cloud depth feature map [depth, vel_x, vel_z]
-        dep: depth annotation
-        bbox: bounding box
+        depth: depth annotation
+        bbox: bounding box [x1, y1, x2, y2]
         distanceThreshold: distance threshold
         config: config / options
 
     Returns:
         None
     """
-    if isinstance(dep, list) and len(dep) > 0:
-        dep = dep[0]
-    ct = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
-    bbox_int = np.array(
-        [np.floor(bbox[0]), np.floor(bbox[1]), np.ceil(bbox[2]), np.ceil(bbox[3])],
-        np.int32,
-    )  # format: xyxy
+    if isinstance(pc_hm, torch.Tensor):
+        lib, toArray, nonzero = (
+            torch,
+            torch.tensor,
+            lambda x: torch.nonzero(x, as_tuple=True),
+        )
+    else:
+        lib, toArray, nonzero = (np, np.array, np.nonzero)
+
+    if isinstance(depth, list) and len(depth) > 0:
+        depth = depth[0]
+
+    center = toArray(
+        [(bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0], dtype=lib.float32
+    )
+    bbox_int = toArray(
+        [lib.floor(bbox[0]), lib.floor(bbox[1]), lib.ceil(bbox[2]), lib.ceil(bbox[3])],
+        lib.int32,
+    )
 
     roi = pc_dep[:, bbox_int[1] : bbox_int[3] + 1, bbox_int[0] : bbox_int[2] + 1]
-    pc_dep, pc_vx, pc_vz = roi[0], roi[1], roi[2]
+    pc_dep, vel_x, vel_z = roi[0], roi[1], roi[2]
 
-    nonzero_inds = np.nonzero(pc_dep)
+    nonZeroIndex = nonzero(pc_dep)
+    if len(nonZeroIndex[0]) > 0:
+        nonZero_pc_dep = pc_dep[nonZeroIndex]
+        nonZero_vel_x = vel_x[nonZeroIndex]
+        nonZero_vel_z = vel_z[nonZeroIndex]
 
-    if len(nonzero_inds[0]) > 0:
-        nonzero_pc_dep = pc_dep[nonzero_inds]
-        nonzero_pc_vx = pc_vx[nonzero_inds]
-        nonzero_pc_vz = pc_vz[nonzero_inds]
-
-        ## Get points within dist threshold
-        within_thresh = (nonzero_pc_dep < dep + distanceThreshold) & (
-            nonzero_pc_dep > max(0, dep - distanceThreshold)
+        # Get points within distance threshold
+        within_thresh = (nonZero_pc_dep < depth + distanceThreshold) & (
+            nonZero_pc_dep > max(0, depth - distanceThreshold)
         )
-        pc_dep_match = nonzero_pc_dep[within_thresh]
-        pc_vx_match = nonzero_pc_vx[within_thresh]
-        pc_vz_match = nonzero_pc_vz[within_thresh]
+        pc_dep_match = nonZero_pc_dep[within_thresh]
+        vel_x_match = nonZero_vel_x[within_thresh]
+        vel_z_match = nonZero_vel_z[within_thresh]
 
         if len(pc_dep_match) > 0:
-            arg_min = np.argmin(pc_dep_match)
+            arg_min = lib.argmin(pc_dep_match)
             dist = pc_dep_match[arg_min]
-            vx = pc_vx_match[arg_min]
-            vz = pc_vz_match[arg_min]
+            vx = vel_x_match[arg_min]
+            vz = vel_z_match[arg_min]
             dist /= max_pc_dist  # normalize depth
 
             w = bbox[2] - bbox[0]
             w_interval = 0.3 * w
-            w_min = int(ct[0] - w_interval / 2.0)
-            w_max = int(ct[0] + w_interval / 2.0)
+            w_min = int(center[0] - w_interval / 2.0)
+            w_max = int(center[0] + w_interval / 2.0)
 
             h = bbox[3] - bbox[1]
             h_interval = 0.3 * h
-            h_min = int(ct[1] - h_interval / 2.0)
-            h_max = int(ct[1] + h_interval / 2.0)
+            h_min = int(center[1] - h_interval / 2.0)
+            h_max = int(center[1] + h_interval / 2.0)
 
             pc_hm[0, h_min : h_max + 1, w_min : w_max + 1 + 1] = dist
             pc_hm[1, h_min : h_max + 1, w_min : w_max + 1 + 1] = vx

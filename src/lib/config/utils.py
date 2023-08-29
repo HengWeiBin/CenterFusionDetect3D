@@ -1,9 +1,17 @@
-import torch
 from yacs.config import CfgNode as CN
+import yaml
+import os
 
 def updateConfig(config, args):
     '''
     Update config with args
+
+    Args:
+        config: config object
+        args: yaml file path from argparser
+
+    Returns:
+        None
     '''
     config.defrost()
 
@@ -16,6 +24,12 @@ def updateConfig(config, args):
 def updateConfigHeads(config):
     '''
     Updates the config heads based on the dataset
+
+    Args:
+        config: config object
+
+    Returns:
+        None
     '''
     heads = {
         # 2D heads
@@ -48,6 +62,12 @@ def updateConfigHeads(config):
 def updateConfigHeadsWeights(config):
     '''
     Updates the config heads weights based on their heads
+
+    Args:
+        config: config object
+
+    Returns:
+        None
     '''
     weightDict = {
         # 2D head-weights
@@ -72,6 +92,12 @@ def updateConfigHeadsWeights(config):
 def updateConvNumOfHeads(config):
     '''
     Assigns the number of convolutions layer for each head
+
+    Args:
+        config: config object
+
+    Returns:
+        None
     '''
     head_conv = {
         head: [256 if head != 'reg' else 1] for head in config.heads
@@ -86,12 +112,26 @@ def updateConvNumOfHeads(config):
     for k, v in head_conv.items():
         exec(f"config.head_conv.{k} = {v}")
 
-def updateDatasetAndModelConfig(config, dataset):
+def updateDatasetAndModelConfig(config, dataset, output_dir):
     '''
     Update dataset and model config with dataset
+
+    Args:
+        config: config object
+        dataset: dataset object
+        output_dir: final output directory
+
+    Returns:
+        None
     '''
     config.defrost()
+    
+    # save config
+    config.OUTPUT_DIR = output_dir
+    with open(os.path.join(output_dir, 'config.yaml'), 'w') as f:
+        f.write(config.dump())
 
+    # update config
     config.DATASET.NUM_CLASSES = dataset.num_categories
     if config.MODEL.INPUT_SIZE is None:
         config.MODEL.INPUT_SIZE = dataset.default_resolution

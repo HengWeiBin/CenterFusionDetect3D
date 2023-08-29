@@ -10,9 +10,13 @@ import torch.backends.cudnn as cudnn
 import random
 import json
 import os
+from tqdm import tqdm
+import psutil  # memory check
+
 from utils import createLogger, saveModel
 from config import config, updateConfig, updateDatasetAndModelConfig
 from dataset import getDataset
+from model import getModel, loadModel
 
 
 def parse_args():
@@ -32,6 +36,18 @@ def parse_args():
 
     args = parser.parse_args()
     updateConfig(config, args)
+
+
+def getOptimizer(config, model):
+    if config.TRAIN.OPTIMIZER == "adam":
+        optimizer = torch.optim.Adam(model.parameters(), config.TRAIN.LR)
+    elif config.TRAIN.OPTIMIZER == "sgd":
+        optimizer = torch.optim.SGD(
+            model.parameters(), config.TRAIN.LR, momentum=0.9, weight_decay=0.0001
+        )
+    else:
+        assert 0, config.TRAIN.OPTIMIZER
+    return optimizer
 
 
 def main():
@@ -59,18 +75,15 @@ def main():
         device = torch.device("cpu")
 
     dataset = getDataset(config.DATASET.DATASET)
-    updateDatasetAndModelConfig(config, dataset)
+    updateDatasetAndModelConfig(config, dataset, output_dir)
     logger.info(config)
 
-    model = None  # TODO: create_model(config)
-    optimizer = None  # TODO: get_optimizer(config, model)
+    model = getModel(config)
+    optimizer = getOptimizer(config, model)
     start_epoch = 0
     lr = config.TRAIN.LR
     if config.MODEL.LOAD_DIR != "":
-        pass
-        # TODO: load_model
-        # model, optimizer, start_epoch = load_model(
-        #     model, config.MODEL.LOAD_DIR, config, optimizer)
+        model, optimizer, start_epoch = loadModel(model, config, optimizer)
     trainer = None  # TODO: Trainer(config, model, optimizer)
 
     val_loader = torch.utils.data.DataLoader(
@@ -78,7 +91,6 @@ def main():
         batch_size=config.TEST.BATCH_SIZE,
         shuffle=False,
         num_workers=config.WORKERS,
-        pin_memory=True,
     )
 
     if config.EVAL:
@@ -90,13 +102,25 @@ def main():
         batch_size=config.TRAIN.BATCH_SIZE,
         shuffle=config.TRAIN.SHUFFLE,
         num_workers=config.WORKERS,
-        pin_memory=True,
         drop_last=True,
     )
     log = dict()
 
-    for _ in train_loader:
-        pass
+    # =================== Testing ====================
+    from torchinfo import summary
+    if os.path.exists("memory_used.txt"):
+        os.remove("memory_used.txt")
+    pbar = tqdm(train_loader, desc="LoaderTest")
+    for iter_id, batch in enumerate(pbar):
+        # summary(model, input_data=batch)
+        break
+        # memory check
+        mem_used = psutil.virtual_memory()[3] / 1000000000
+        with open("memory_used.txt", "a") as f:
+            f.write(f"{mem_used}" + "\n")
+        pbar_msg = f"LoaderTest mem_used: {mem_used:.2f}"
+        pbar.set_description(pbar_msg)
+    # =================== Testing ====================
 
     for epoch in range(start_epoch + 1, config.TRAIN.EPOCHS + 1):
         # train

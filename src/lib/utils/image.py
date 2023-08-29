@@ -62,8 +62,7 @@ def getAffineTransform(
         scaleFactor = np.array([scaleFactor, scaleFactor], dtype=np.float32)
 
     src_w = scaleFactor[0]
-    dst_w = outputSize[0]
-    dst_h = outputSize[1]
+    dst_w, dst_h = outputSize[0], outputSize[1]
 
     rotateRadian = np.pi * rotateFactor / 180.0
     srcDirection = getDirection([0, src_w * -0.5], rotateRadian)
@@ -74,7 +73,7 @@ def getAffineTransform(
     src[0, :] = center + scaleFactor * shift
     src[1, :] = center + srcDirection + scaleFactor * shift
     dst[0, :] = np.array([dst_w * 0.5, dst_h * 0.5], dtype=np.float32)
-    dst[1, :] = dstDirection + np.array([dst_w * 0.5, dst_h * 0.5], dtype=np.float32)
+    dst[1, :] = dstDirection + dst[0, :]
 
     src[2:, :] = get3rdPoint(src[0, :], src[1, :])
     dst[2:, :] = get3rdPoint(dst[0, :], dst[1, :])
