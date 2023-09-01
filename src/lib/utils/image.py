@@ -84,20 +84,21 @@ def getAffineTransform(
         return cv2.getAffineTransform(src, dst)
 
 
-def affineTransform(point, transformMat):
+def affineTransform(points, transformMat):
     """
-    Applies an affine transformation to a point.
+    Applies an affine transformation to a set of points.
 
     Args:
         point: The point to be transformed.
         transformMat: The affine transformation matrix.
 
     Returns:
-        The transformed point.
+        The transformed points.
     """
-    newPoint = np.array([point[0], point[1], 1.0], dtype=np.float32)
-    newPoint = np.dot(transformMat, newPoint)
-    return point[:2]
+    newPoints = np.ones((points.shape[0], 3), dtype=np.float32)
+    newPoints[:, :2] = points
+    newPoints = np.dot(transformMat, newPoints.T).T
+    return newPoints[:, :2]
 
 
 def lightingAug(image):

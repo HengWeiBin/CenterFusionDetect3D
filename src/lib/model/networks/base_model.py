@@ -79,7 +79,6 @@ class BaseModel(nn.Module):
         ## extract features from image
         feats = self.img2feats(x)
         out = []
-
         for stack in range(self.num_stacks):
             z = {}
 

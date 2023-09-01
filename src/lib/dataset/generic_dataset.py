@@ -28,15 +28,6 @@ from utils.pointcloud import RadarPointCloudWithVelocity as RadarPointCloud
 from utils.ddd import get3dBox, project3DPoints, draw3DBox
 from utils.image import getGaussianRadius
 
-# from utils.image import flip, color_aug
-# from utils.image import affine_transform
-# from utils.pointcloud import map_pointcloud_to_image, pc_dep_to_hm
-# from nuscenes.utils.data_classes import Box
-# from pyquaternion import Quaternion
-# from nuscenes.utils.geometry_utils import view_points
-# from utils.ddd_utils import compute_box_3d, project_to_image, draw_box_3d
-# from utils.ddd_utils import comput_corners_3d, alpha2rot_y, get_pc_hm
-
 
 class GenericDataset(torch.utils.data.Dataset):
     # default_resolution = None
@@ -115,8 +106,8 @@ class GenericDataset(torch.utils.data.Dataset):
             classIds: class id
             mask: TODO
             widthHeight: width and height of bounding box (w, h)
-            wh_mask: TODO
-            index: index for get feature map
+            widthHeight_mask: TODO
+            indices: indices for get feature map
             reg: TODO
             reg_mask: TODO
             heatmap: heatmap for each class
@@ -134,7 +125,7 @@ class GenericDataset(torch.utils.data.Dataset):
             pc_dep: radar point cloud depth
             rotbin: rotation bin
             rotres: rotation residual
-            rot_mask: rotation mask
+            rotation_mask: rotation mask
 
         target:
             bboxes
@@ -413,7 +404,7 @@ class GenericDataset(torch.utils.data.Dataset):
         result = cv2.warpAffine(
             img,
             transformMat,
-            (self.config.MODEL.OUTPUT_SIZE[1], self.config.MODEL.OUTPUT_SIZE[0]),
+            (self.config.MODEL.INPUT_SIZE[1], self.config.MODEL.INPUT_SIZE[0]),
             flags=cv2.INTER_LINEAR,
         )
         result = result.astype(np.float32) / 255.0
@@ -442,7 +433,7 @@ class GenericDataset(torch.utils.data.Dataset):
             ),
             np.float32,
         )
-        item["index"] = np.zeros((self.max_objs), dtype=np.int64)
+        item["indices"] = np.zeros((self.max_objs), dtype=np.int64)
         item["classIds"] = np.zeros((self.max_objs), dtype=np.int64)
         item["mask"] = np.zeros((self.max_objs), dtype=np.float32)
 
@@ -479,7 +470,7 @@ class GenericDataset(torch.utils.data.Dataset):
         if "rotation" in self.config.heads:
             item["rotbin"] = np.zeros((self.max_objs, 2), dtype=np.int64)
             item["rotres"] = np.zeros((self.max_objs, 2), dtype=np.float32)
-            item["rot_mask"] = np.zeros((self.max_objs), dtype=np.float32)
+            item["rotation_mask"] = np.zeros((self.max_objs), dtype=np.float32)
             target.update({"rotation": []})
 
     def _mask_ignore_or_crowd(self, item, classId, bbox):
@@ -535,8 +526,7 @@ class GenericDataset(torch.utils.data.Dataset):
                 [bbox[2], bbox[1]],
             ]
         )
-        for i in range(4):
-            rect[i] = affineTransform(rect[i], transMatOut)
+        rect[:] = affineTransform(rect, transMatOut)
         bbox = np.array(
             [rect[:, 0].min(), rect[:, 1].min(), rect[:, 0].max(), rect[:, 1].max()]
         )
@@ -574,7 +564,7 @@ class GenericDataset(torch.utils.data.Dataset):
         if "widthHeight" in item:
             item["widthHeight"][k] = float(width), float(height)
             item["widthHeight_mask"][k] = 1
-        item["index"][k] = (
+        item["indices"][k] = (
             center_int[1] * self.config.MODEL.OUTPUT_SIZE[1] + center_int[0]
         )
         item["reg"][k] = center - center_int
@@ -611,7 +601,7 @@ class GenericDataset(torch.utils.data.Dataset):
 
         if "rotation" in self.config.heads:
             if "alpha" in ann:
-                item["rot_mask"][k] = 1
+                item["rotation_mask"][k] = 1
                 alpha = ann["alpha"]
                 if alpha < np.pi / 6.0 or alpha > 5 * np.pi / 6.0:
                     item["rotbin"][k, 0] = 1

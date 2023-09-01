@@ -17,6 +17,7 @@ from utils import createLogger, saveModel
 from config import config, updateConfig, updateDatasetAndModelConfig
 from dataset import getDataset
 from model import getModel, loadModel
+from trainer import Trainer
 
 
 def parse_args():
@@ -84,7 +85,8 @@ def main():
     lr = config.TRAIN.LR
     if config.MODEL.LOAD_DIR != "":
         model, optimizer, start_epoch = loadModel(model, config, optimizer)
-    trainer = None  # TODO: Trainer(config, model, optimizer)
+    trainer = Trainer(config, model, optimizer)
+    trainer.setDevice(config)
 
     val_loader = torch.utils.data.DataLoader(
         dataset(config, config.DATASET.VAL_SPLIT, device),
@@ -104,23 +106,7 @@ def main():
         num_workers=config.WORKERS,
         drop_last=True,
     )
-    log = dict()
-
-    # =================== Testing ====================
-    from torchinfo import summary
-    if os.path.exists("memory_used.txt"):
-        os.remove("memory_used.txt")
-    pbar = tqdm(train_loader, desc="LoaderTest")
-    for iter_id, batch in enumerate(pbar):
-        # summary(model, input_data=batch)
-        break
-        # memory check
-        mem_used = psutil.virtual_memory()[3] / 1000000000
-        with open("memory_used.txt", "a") as f:
-            f.write(f"{mem_used}" + "\n")
-        pbar_msg = f"LoaderTest mem_used: {mem_used:.2f}"
-        pbar.set_description(pbar_msg)
-    # =================== Testing ====================
+    log = {"memory": []}
 
     for epoch in range(start_epoch + 1, config.TRAIN.EPOCHS + 1):
         # train

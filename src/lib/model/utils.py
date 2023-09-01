@@ -12,7 +12,11 @@ def topk(heatmap, K=100):
         K: number of elements to return
 
     Returns:
-        top k elements of the heatmap
+        topk_heat: heatmap of the top k elements
+        topk_inds: indices of the top k elements in input heatmap
+        topk_classes: classes of the top k elements
+        topk_ys: y coordinates of the top k elements
+        topk_xs: x coordinates of the top k elements
     """
     batch, nclass, height, width = heatmap.size()
 
@@ -102,3 +106,34 @@ def initUpModuleWeights(up):
             )
     for ceil in range(1, weights.size(0)):
         weights[ceil, 0, :, :] = weights[0, 0, :, :]
+
+
+def nms(heatmap, kernel=3):
+    """
+    Performs non-maximum suppression on the heatmap
+
+    Args:
+        heatmap: heatmap
+        kernel: kernel size
+
+    Returns:
+        heatmap after non-maximum suppression
+    """
+    pad = (kernel - 1) // 2
+
+    hmax = nn.functional.max_pool2d(heatmap, (kernel, kernel), stride=1, padding=pad)
+    keep = (hmax == heatmap).float()
+    return heatmap * keep
+
+def sigmoid(x):
+    """
+    Applies sigmoid function to the input
+
+    Args:
+        x: input
+
+    Returns:
+        sigmoid(x)
+    """
+    y = torch.clamp(x.sigmoid_(), min=1e-4, max=1-1e-4)
+    return y

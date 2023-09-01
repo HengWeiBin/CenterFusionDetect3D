@@ -261,15 +261,16 @@ class DLA(nn.Module):
             inplanes = planes
         return nn.Sequential(*modules)
 
-    def forward(self, x, pre_img=None, pre_hm=None):
+    # TODO delete pre
+    def forward(self, x):#, pre_img=None, pre_hm=None):
         y = []
         x = self.base_layer(x)
-        if pre_img is not None:
-            x = x + self.pre_img_layer(pre_img)
-        if pre_hm is not None:
-            x = x + self.pre_hm_layer(pre_hm)
+        # if pre_img is not None:
+        #     x = x + self.pre_img_layer(pre_img)
+        # if pre_hm is not None:
+        #     x = x + self.pre_hm_layer(pre_hm)
         for i in range(6):
-            x = getattr(self, "level{}".format(i))(x)
+            x = getattr(self, f"level{i}")(x)
             y.append(x)
 
         return y

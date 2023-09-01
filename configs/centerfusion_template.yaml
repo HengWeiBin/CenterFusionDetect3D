@@ -35,7 +35,7 @@ MODEL:
   ARCH: "dla_34"                  # model architecture
   FREEZE_BACKBONE: false          # freeze the backbone network and only train heads
   FUSION_STRATEGY: 'middle' # TODO
-  INPUT_SIZE: (488, 800)
+  INPUT_SIZE: (448, 800)
   FRUSTUM: true                   # Enable frustum association
   GENERIC_NET:
     BACKBONE: "dla34"

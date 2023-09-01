@@ -9,13 +9,14 @@ WORKERS: 0
 DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save debug images
 EVAL: false                       # only evaluate the val split and quit
 RANDOM_SEED: 123
+CONF_THRESH: 0.3                  # confidence threshold
 
 DATASET:
   DATASET: 'nuscenes'             # currently support nuscenes only
   ROOT: data/
   RANDOM_CROP: false              # random crop data augmentation from CornerNet
   MAX_CROP: true                  # used when the training dataset has inbalanced aspect ratios
-  SHIFT: 0.                      # shift augmentation
+  SHIFT: 0.2                      # shift augmentation
   SCALE: 0                        # scale augmentation
   ROTATE: 0                       # rotation augmentation
   FLIP: 0.5                       # flip augmentation
@@ -35,7 +36,7 @@ MODEL:
   ARCH: "dla_34"                  # model architecture
   FREEZE_BACKBONE: false          # freeze the backbone network and only train heads
   FUSION_STRATEGY: 'middle' # TODO
-  INPUT_SIZE: (488, 800)
+  INPUT_SIZE: (448, 800)
   FRUSTUM: true                   # Enable frustum association
   GENERIC_NET:
     BACKBONE: "dla34"

@@ -77,7 +77,9 @@ def updateConfigHeadsWeights(config):
 
         # 3D head-weights
         'depth': config.LOSS.WEIGHTS.DEPTH,
+        'depth2': config.LOSS.WEIGHTS.DEPTH,
         'rotation': config.LOSS.WEIGHTS.ROTATION,
+        'rotation2': config.LOSS.WEIGHTS.ROTATION,
         'dimension': config.LOSS.WEIGHTS.DIMENSION,
         'amodal_offset': config.LOSS.WEIGHTS.AMODAL_OFFSET,
 

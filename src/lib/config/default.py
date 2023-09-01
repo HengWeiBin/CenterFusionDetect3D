@@ -13,6 +13,7 @@ _Cfg.WORKERS = 4
 _Cfg.DEBUG = 0
 _Cfg.EVAL = False
 _Cfg.RANDOM_SEED = 0
+_Cfg.CONF_THRESH = 0.3
 
 _Cfg.DATASET = CN()
 _Cfg.DATASET.DATASET = 'nuscenes'

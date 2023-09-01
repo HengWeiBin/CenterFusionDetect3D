@@ -102,3 +102,66 @@ def draw3DBox(image, corners, color=(255, 0, 255), same_color=False):
                 pass
         # top_idx = [0, 1, 2, 3]
     return image
+
+
+def alpha2rot_y(alpha, x, cx, focalLength):
+    """
+    Get rotation_y by alpha + theta - 180
+
+    Args:
+        alpha : Observation angle of object, ranging [-pi..pi]
+        x : Object center x to the camera center (x-W/2), in pixels
+        cx: Camera center x, in pixels
+        focalLength: Camera focal length
+
+    Returns:
+        rotation_y: Rotation ry around Y-axis in camera coordinates [-pi..pi]
+    """
+    rot_y = alpha + np.arctan2(x - cx, focalLength)
+    if rot_y > np.pi:
+        rot_y -= 2 * np.pi
+    if rot_y < -np.pi:
+        rot_y += 2 * np.pi
+    return rot_y
+
+
+# unproject_2d_to_3d
+def project2DTo3D(pt_2d, depth, calib):
+    """
+    Project 2D points into 3D space by depth and camera calibration matrix.
+
+    Args:
+        pt_2d: array of shape (2,) for 2D points
+        depth: depth of the point
+        calib: array of shape (3, 4) for camera calibration matrix
+
+    Returns:
+        pt_3d: array of shape (3,) for 3D points
+    """
+    z = depth - calib[2, 3]
+    x = (pt_2d[0] * depth - calib[0, 3] - calib[0, 2] * z) / calib[0, 0]
+    y = (pt_2d[1] * depth - calib[1, 3] - calib[1, 2] * z) / calib[1, 1]
+    pt_3d = np.array([x, y, z], dtype=np.float32).reshape(3)
+    return pt_3d
+
+
+# ddd2locrot
+def cvtImgToCamCoord(center, alpha, dim, depth, calib):
+    """
+    Convert 3D detection from image coordinate to camera coordinate.
+
+    Args:
+        center: array of x, y in image coordinate
+        alpha: angle around Y-axis in camera coordinates [-pi..pi]
+        dim: array of h, w, l
+        depth: depth of the object
+        calib: array of shape (3, 4) for camera calibration matrix
+
+    Returns:
+        locations: array of x, y, z in camera coordinate
+        rotation_y: rotation around y-axis in camera coordinates [-pi..pi]
+    """
+    locations = project2DTo3D(center, depth, calib)
+    locations[1] += dim[0] / 2
+    rotation_y = alpha2rot_y(alpha, center[0], calib[0, 2], calib[0, 0])
+    return locations, rotation_y
