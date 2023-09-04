@@ -2,11 +2,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import os
 from pathlib import Path
 import time
 import logging
 import torch
+import matplotlib.pyplot as plt
 
 
 def createLogger(cfg, phase="train"):
@@ -49,7 +49,7 @@ def createLogger(cfg, phase="train"):
     return logger, str(final_output_dir)
 
 
-def saveModel(log, model, output_file, optimizer=None):
+def saveModel(log, model, epoch, output_file, optimizer=None):
     """
     Save model and log to output_file
 
@@ -70,8 +70,62 @@ def saveModel(log, model, output_file, optimizer=None):
     if not (optimizer is None):
         log["optimizer"] = optimizer.state_dict()
 
-    # TODO: Add epoch key
+    log["epoch"] = epoch
+
     torch.save(log, output_file)
+
+
+def plotResults(log, output_dir):
+    """
+    Plot training and validation loss
+
+    Args:
+        log: dictionary containing loss
+        output_dir: output directory
+
+    Returns:
+        None
+    """
+    heads = [
+        "total",
+        # 2D head-weights
+        "heatmap",
+        "widthHeight",
+        "reg",
+        # 3D head-weights
+        "depth",
+        "depth2",
+        "rotation",
+        "rotation2",
+        "dimension",
+        "amodal_offset",
+        # other head-weights
+        "nuscenes_att",
+        "velocity",
+    ]
+    output_dir = Path(output_dir)
+    fig = plt.figure(figsize=(25, 8))
+    for i, key in enumerate(heads):
+        if key not in log["train"]:
+            continue
+        plt.subplot(2, 6, i + 1)
+        plt.plot(log["train"][key], label="train_loss")
+        plt.plot(log["val"][key], label="val_loss")
+        plt.title(key)
+    plt.suptitle("Train Loss", fontsize="xx-large")
+    fig.supylabel("loss", fontsize="x-large")
+    fig.supxlabel("epoch", fontsize="x-large")
+    plt.legend()
+    plt.savefig(output_dir / "plot.png")
+
+    # Plot memory usage
+    fig = plt.figure()
+    plt.plot(log["memory"], color='r')
+    plt.title('System Memory')
+    plt.xlabel('Steps')
+    plt.ylabel('Memory Used (GB)')
+    plt.ylim([0, 64])
+    plt.savefig(output_dir / 'memory_used.png')
 
 
 class AverageMeter(object):
@@ -92,3 +146,7 @@ class AverageMeter(object):
         self.count += n
         if self.count > 0:
             self.avg = self.sum / self.count
+
+if __name__ == '__main__':
+    log = torch.load('output/CenterFusionDebug/2023-09-03-14-00/model_last.pt')
+    plotResults(log, 'output/CenterFusionDebug/2023-09-03-14-00')

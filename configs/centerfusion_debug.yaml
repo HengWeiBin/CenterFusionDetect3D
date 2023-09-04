@@ -5,7 +5,7 @@ CUDNN:
   ENABLED: true
 GPUS:                             # -1 for CPU
 - 0
-WORKERS: 0
+WORKERS: 4
 DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save debug images
 EVAL: false                       # only evaluate the val split and quit
 RANDOM_SEED: 123
@@ -32,9 +32,9 @@ DATASET:
     PILLAR_DIMS: (1.5, 0.2, 0.2)  # Radar pillar dimensions (h,w,l)
 
 MODEL:
-  LOAD_DIR: ''
+  LOAD_DIR: 'models/nuScenes_3Ddetection_e140.pth'
   ARCH: "dla_34"                  # model architecture
-  FREEZE_BACKBONE: false          # freeze the backbone network and only train heads
+  FREEZE_BACKBONE: true           # freeze the backbone network and only train heads
   FUSION_STRATEGY: 'middle' # TODO
   INPUT_SIZE: (448, 800)
   FRUSTUM: true                   # Enable frustum association
@@ -59,7 +59,7 @@ LOSS:
     VELOCITY: 1                   # velocity
 
 TRAIN:
-  BATCH_SIZE: 4
+  BATCH_SIZE: 16
   SHUFFLE: true                   # shuffle training dataloader
   EPOCHS: 60
   RESUME: false
@@ -67,7 +67,7 @@ TRAIN:
   LR: 2.5e-4
   LR_STEP: (50,)                  # drop learning rate step
   SAVE_POINT: 20,40,50            # save model at these epochs
-  VAL_INTERVALS: 10               # number of epochs to run validation
+  VAL_INTERVALS: 1                # number of epochs to run validation
   SCALE_FACTOR: 16
 
 TEST:

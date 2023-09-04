@@ -80,7 +80,7 @@ def loadModel(model, config, optimizer=None):
     model.load_state_dict(state_dict, strict=False)
 
     # freeze backbone network
-    if config.freeze_backbone:
+    if config.MODEL.FREEZE_BACKBONE:
         for name, module in model.named_children():
             if name in config.layers_to_freeze:
                 for name, layer in module.named_children():
@@ -94,7 +94,7 @@ def loadModel(model, config, optimizer=None):
             start_lr = config.TRAIN.LR
             for step in config.TRAIN.LR_STEP:
                 if start_epoch >= step:
-                    start_lr *= 0.1  # TODO:check
+                    start_lr *= 0.1
             for param_group in optimizer.param_groups:
                 param_group["lr"] = start_lr
             print("Resumed optimizer with start lr", start_lr)

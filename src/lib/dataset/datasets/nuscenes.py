@@ -39,7 +39,7 @@ class nuScenes(GenericDataset):
     ]
     class_ids = {
         i + 1: i + 1 for i in range(num_categories)
-    }  # TODO: cat_ids -> class_ids
+    }
 
     vehicles = ["car", "truck", "bus", "trailer", "construction_vehicle"]
     cycles = ["motorcycle", "bicycle"]
@@ -184,9 +184,9 @@ class nuScenes(GenericDataset):
                     size = item["size"]
                 else:
                     size = [
-                        float(item["dim"][1]),
-                        float(item["dim"][2]),
-                        float(item["dim"][0]),
+                        float(item["dimension"][1]),
+                        float(item["dimension"][2]),
+                        float(item["dimension"][0]),
                     ]
 
                 if "translation" in item:
@@ -237,9 +237,9 @@ class nuScenes(GenericDataset):
                 att = ""
                 if class_name in self.cycles:
                     att = self.id_to_attribute[np.argmax(nuscenes_att[0:2]) + 1]
-                elif class_name in self._pedestrians:
+                elif class_name in self.pedestrians:
                     att = self.id_to_attribute[np.argmax(nuscenes_att[2:5]) + 3]
-                elif class_name in self._vehicles:
+                elif class_name in self.vehicles:
                     att = self.id_to_attribute[np.argmax(nuscenes_att[5:8]) + 6]
 
                 if "velocity" in item and len(item["velocity"]) == 2:
@@ -300,22 +300,21 @@ class nuScenes(GenericDataset):
         return ret
 
     def run_eval(self, results, save_dir, n_plots=10):
-        task = "det"
         split = self.config.DATASET.VAL_SPLIT
         version = "v1.0-mini" if "mini" in split else "v1.0-trainval"
         json.dump(
             self.convert_eval_format(results),
-            open(f"{save_dir}/results_nuscenes_{task}_{split}.json", "w"),
+            open(f"{save_dir}/results_nuscenes_det_{split}.json", "w"),
         )
 
         output_dir = f"{save_dir}/nuscenes_eval_det_output_{split}/"
         os.system(
             "python "
-            + "tools/nuscenes-devkit/python-sdk/nuscenes/eval/detection/evaluate.py "
-            + f"{save_dir}/results_nuscenes_{task}_{split}.json "
+            + "src/nuscenes-devkit/python-sdk/nuscenes/eval/detection/evaluate.py "
+            + f"{save_dir}/results_nuscenes_det_{split}.json "
             + f"--output_dir {output_dir} "
             + f"--eval_set {split} "
-            + "--dataroot ../data/nuscenes/ "
+            + "--dataroot data/nuscenes/ "
             + f"--version {version} "
             + f"--plot_examples {n_plots} "
             + "--render_curves 1 "

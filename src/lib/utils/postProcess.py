@@ -49,14 +49,14 @@ def postProcess(
     for i in range(len(detects["scores"])):
         preds = []
         transMat = getAffineTransform(
-            centers[i], scales[i], 0, (width, height), inv=True
+            centers[i], scales[i], 0, (width, height), inverse=True
         ).astype(np.float32)
         for j in range(len(detects["scores"][i])):
             if detects["scores"][i][j] < config.CONF_THRESH:
                 break
             item = {}
             item["score"] = detects["scores"][i][j]
-            item["class"] = int(detects["clses"][i][j]) + 1
+            item["class"] = int(detects["classes"][i][j]) + 1
             item["center"] = affineTransform(
                 (detects["centers"][i][j]).reshape(1, 2), transMat
             ).reshape(2)
@@ -95,6 +95,7 @@ def postProcess(
                 else:
                     bbox = item["bbox"]
                     center = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]
+
                 item["center"] = center
                 item["loc"], item["rot_y"] = cvtImgToCamCoord(
                     center, item["alpha"], item["dimension"], item["depth"], calibs[i]

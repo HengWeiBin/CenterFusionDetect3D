@@ -207,15 +207,13 @@ class Trainer(object):
         pbar_title_indent = " " * (16 if phase == "train" else 13)
         print(
             pbar_title_indent
-            + "\t".join([loss.split("_")[-1] for loss in avgLossStats.keys()])
-            + "    RAM"
+            + "".join([f"{loss[:6]+'.':>9}" for loss in avgLossStats.keys()])
+            + f"{'RAM ':>9}"
         )
         pbar = tqdm(dataloader, desc=phase)
 
         # Start iterating over batches
-        for iter_id, batch in enumerate(pbar):
-            if iter_id >= len(dataloader):
-                break
+        for batch in pbar:
             for k in batch:
                 if k != "meta":
                     batch[k] = batch[k].to(device=self.device, non_blocking=True)
@@ -234,9 +232,9 @@ class Trainer(object):
             pbar_msg = f"{phase} epoch {epoch}: "
             for loss in avgLossStats:
                 avgLossStats[loss].update(loss_stats[loss], batch["image"].size(0))
-                pbar_msg += f"{avgLossStats[loss].avg:.2f}" + " " * 4
+                pbar_msg += f"{avgLossStats[loss].avg:9.2f}"
             mem_used = psutil.virtual_memory()[3] / 1e9
-            pbar_msg += f"{mem_used:.2f}    "
+            pbar_msg += f"{mem_used:9.2f}"
             pbar.set_description(pbar_msg)
 
             # if self.config.DEBUG > 0: # TODO
@@ -245,7 +243,7 @@ class Trainer(object):
             # generate detections for evaluation
             if phase == "val" and (self.config.TEST.OFFICIAL_EVAL or self.config.EVAL):
                 meta = batch["meta"]
-                detects = fusionDecode(output, K=self.config.K)
+                detects = fusionDecode(output, K=self.config.TEST.K)
 
                 for k in detects:
                     detects[k] = detects[k].detach().cpu().numpy()
@@ -269,20 +267,20 @@ class Trainer(object):
                     ):
                         result.append(detects[0][i])
 
-                img_id = batch["meta"]["img_id"].numpy().astype(np.int32)[0]
+                img_id = meta["img_id"].numpy().astype(np.int32)[0]
                 results[img_id] = result
 
         # Log epoch results
         for loss in avgLossStats:
-            if loss not in log:
-                log[loss] = []
-            log[loss].append(avgLossStats[loss].avg)
+            if phase not in log:
+                log[phase] = {}
+            if loss not in log[phase]:
+                log[phase][loss] = []
+            log[phase][loss].append(avgLossStats[loss].avg)
         log["memory"].append(mem_used)
         logger.info(pbar_msg)
 
-        ret = {k: v.avg for k, v in avgLossStats.items()}
-        ret["time"] = pbar.format_dict["elapsed"]
-        return ret, results
+        return results
 
     def getLossFunction(self, config):
         """
@@ -312,10 +310,8 @@ class Trainer(object):
         loss = GenericLoss(config)
         return loss_states, loss
 
-    # def debug(self, batch, output, iter_id, dataset):
+        # def debug(self, batch, output, iter_id, dataset):
         opt = self.opt
-        if "pre_hm" in batch:
-            output.update({"pre_hm": batch["pre_hm"]})
         dets = fusionDecode(output, K=opt.K, opt=opt)
         for k in dets:
             dets[k] = dets[k].detach().cpu().numpy()
@@ -356,21 +352,6 @@ class Trainer(object):
                     )
                     pc_dep = debugger.add_overlay_img(img, pc_hm, "pc_dep")
 
-            if "pre_img" in batch:
-                pre_img = batch["pre_img"][i].detach().cpu().numpy().transpose(1, 2, 0)
-                pre_img = np.clip(
-                    ((pre_img * dataset.std + dataset.mean) * 255), 0, 255
-                ).astype(np.uint8)
-                debugger.add_img(pre_img, "pre_img_pred")
-                debugger.add_img(pre_img, "pre_img_gt")
-                if "pre_hm" in batch:
-                    pre_hm = debugger.gen_colormap(
-                        batch["pre_hm"][i].detach().cpu().numpy()
-                    )
-                    debugger.add_blend_img(
-                        pre_img, pre_hm, "pre_hm", trans=self.opt.hm_transparency
-                    )
-
             debugger.add_img(img, img_id="out_pred")
 
             # Predictions
@@ -400,43 +381,6 @@ class Trainer(object):
                         img_id="out_gt",
                         dist=dist,
                     )
-
-                    if "ltrb_amodal" in opt.heads:
-                        debugger.add_coco_bbox(
-                            dets_gt["bboxes_amodal"][i, k] * opt.down_ratio,
-                            dets_gt["clses"][i, k],
-                            dets_gt["scores"][i, k],
-                            img_id="out_gt_amodal",
-                        )
-
-                    if "hps" in opt.heads and (int(dets["clses"][i, k]) == 0):
-                        debugger.add_coco_hp(
-                            dets_gt["hps"][i][k] * opt.down_ratio, img_id="out_gt"
-                        )
-
-                    if "tracking" in opt.heads:
-                        debugger.add_arrow(
-                            dets_gt["cts"][i][k] * opt.down_ratio,
-                            dets_gt["tracking"][i][k] * opt.down_ratio,
-                            img_id="out_gt",
-                        )
-                        debugger.add_arrow(
-                            dets_gt["cts"][i][k] * opt.down_ratio,
-                            dets_gt["tracking"][i][k] * opt.down_ratio,
-                            img_id="pre_img_gt",
-                        )
-
-            if "hm_hp" in opt.heads:
-                pred = debugger.gen_colormap_hp(
-                    output["hm_hp"][i].detach().cpu().numpy()
-                )
-                gt = debugger.gen_colormap_hp(batch["hm_hp"][i].detach().cpu().numpy())
-                debugger.add_blend_img(
-                    img, pred, "pred_hmhp", trans=self.opt.hm_transparency
-                )
-                debugger.add_blend_img(
-                    img, gt, "gt_hmhp", trans=self.opt.hm_transparency
-                )
 
             if (
                 "rotation" in opt.heads

@@ -1,5 +1,0 @@
-opencv-python
-scipy
-matplotlib
-tqdm
-pyyaml

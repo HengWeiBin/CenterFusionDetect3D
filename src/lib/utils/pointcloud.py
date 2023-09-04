@@ -327,8 +327,8 @@ def getPcFrustumHeatmap(output, pc_dep, calib, config):
     )  # B x K x 4
 
     # get dimensions and rotation
-    dims = transposeAndGetFeature(output["dim"], indices).view(batch, K, -1)
-    rot = transposeAndGetFeature(output["rot"], indices).view(batch, K, -1)
+    dims = transposeAndGetFeature(output["dimension"], indices).view(batch, K, -1)
+    rot = transposeAndGetFeature(output["rotation"], indices).view(batch, K, -1)
 
     # Draw heatmap
     for i, [pc_dep_b, bboxes_b, depth_b, dim_b, rot_b] in enumerate(
@@ -384,8 +384,13 @@ def cvtPcDepthToHeatmap(pc_hm, pc_dep, depth, bbox, distanceThreshold, max_pc_di
         [(bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0], dtype=lib.float32
     )
     bbox_int = toArray(
-        [lib.floor(bbox[0]), lib.floor(bbox[1]), lib.ceil(bbox[2]), lib.ceil(bbox[3])],
-        lib.int32,
+        [
+            int(lib.floor(bbox[0])),
+            int(lib.floor(bbox[1])),
+            int(lib.ceil(bbox[2])),
+            int(lib.ceil(bbox[3])),
+        ],
+        dtype=lib.int32,
     )
 
     roi = pc_dep[:, bbox_int[1] : bbox_int[3] + 1, bbox_int[0] : bbox_int[2] + 1]

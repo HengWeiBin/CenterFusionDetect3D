@@ -31,7 +31,7 @@ DATASET:
     PILLAR_DIMS: (1.5, 0.2, 0.2)  # Radar pillar dimensions (h,w,l)
 
 MODEL:
-  LOAD_DIR: ''
+  LOAD_DIR: 'models/centernet_baseline_e170.pth'
   ARCH: "dla_34"                  # model architecture
   FREEZE_BACKBONE: false          # freeze the backbone network and only train heads
   FUSION_STRATEGY: 'middle' # TODO

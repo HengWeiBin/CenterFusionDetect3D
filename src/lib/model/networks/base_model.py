@@ -91,7 +91,7 @@ class BaseModel(nn.Module):
                 ## get pointcloud heatmap
                 if not self.training:
                     if self.config.MODEL.FRUSTUM:
-                        pc_hm = pc.getPcFrustumHeatmap(z, pc_dep, calib, self.config) # TODO
+                        pc_hm = pc.getPcFrustumHeatmap(z, pc_dep, calib, self.config)
                     else:
                         pc_hm = pc_dep
                         pc_hm[0] /= self.config.DATASET.NUSCENES.MAX_PC_DIST
