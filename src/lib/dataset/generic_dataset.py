@@ -407,7 +407,7 @@ class GenericDataset(torch.utils.data.Dataset):
         )
         result = result.astype(np.float32) / 255.0
         result = result.transpose(2, 0, 1)
-        result = torch.from_numpy(result)  # .to(self.device) # TODO
+        result = torch.from_numpy(result)#.to(self.device) # TODO
         if "train" in self.split and self.config.DATASET.COLOR_AUG:
             result = self.colorAugmentor(result)
         return result
@@ -422,6 +422,18 @@ class GenericDataset(torch.utils.data.Dataset):
 
         Returns:
             None
+
+            bboxes
+            scores
+            classIds
+            centers
+            nuscenes_att
+            velocity
+            depth
+            dimension
+            amodal_offset
+            reg
+            rotation
         """
         item["heatmap"] = np.zeros(
             (

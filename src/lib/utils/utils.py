@@ -108,9 +108,13 @@ def plotResults(log, output_dir):
     for i, key in enumerate(heads):
         if key not in log["train"]:
             continue
+        x_train = range(len(log["train"][key]))
+        x_val = range(
+            0, len(log["train"][key]), len(log["train"][key]) // len(log["val"][key]) + 1
+        )
         plt.subplot(2, 6, i + 1)
-        plt.plot(log["train"][key], label="train_loss")
-        plt.plot(log["val"][key], label="val_loss")
+        plt.plot(x_train, log["train"][key], label="train_loss")
+        plt.plot(x_val, log["val"][key], label="val_loss")
         plt.title(key)
     plt.suptitle("Train Loss", fontsize="xx-large")
     fig.supylabel("loss", fontsize="x-large")
@@ -120,12 +124,11 @@ def plotResults(log, output_dir):
 
     # Plot memory usage
     fig = plt.figure()
-    plt.plot(log["memory"], color='r')
-    plt.title('System Memory')
-    plt.xlabel('Steps')
-    plt.ylabel('Memory Used (GB)')
-    plt.ylim([0, 64])
-    plt.savefig(output_dir / 'memory_used.png')
+    plt.plot(log["memory"], color="r")
+    plt.title("System Memory")
+    plt.xlabel("Steps")
+    plt.ylabel("Memory Used (GB)")
+    plt.savefig(output_dir / "memory_used.png")
 
 
 class AverageMeter(object):
@@ -147,6 +150,7 @@ class AverageMeter(object):
         if self.count > 0:
             self.avg = self.sum / self.count
 
-if __name__ == '__main__':
-    log = torch.load('output/CenterFusionDebug/2023-09-03-14-00/model_last.pt')
-    plotResults(log, 'output/CenterFusionDebug/2023-09-03-14-00')
+
+if __name__ == "__main__":
+    log = torch.load("output/CenterFusionBaseline/2023-09-09-05-18/model_last.pt")
+    plotResults(log, "output/CenterFusionBaseline/2023-09-09-05-18")

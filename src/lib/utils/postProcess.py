@@ -97,7 +97,7 @@ def postProcess(
                     center = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]
 
                 item["center"] = center
-                item["loc"], item["rot_y"] = cvtImgToCamCoord(
+                item["location"], item["yaw"] = cvtImgToCamCoord(
                     center, item["alpha"], item["dimension"], item["depth"], calibs[i]
                 )
 
@@ -113,8 +113,8 @@ def postProcess(
                 if config.DATASET.NUSCENES.RADAR_PC and not is_gt:
                     ## put velocity in the same direction as box orientation
                     V = math.sqrt(vel[0] ** 2 + vel[2] ** 2)
-                    vel[0] = np.cos(preds[j]["rot_y"]) * V
-                    vel[2] = -np.sin(preds[j]["rot_y"]) * V
+                    vel[0] = np.cos(preds[j]["yaw"]) * V
+                    vel[2] = -np.sin(preds[j]["yaw"]) * V
                 preds[j]["velocity"] = vel[:3]
 
         ret.append(preds)

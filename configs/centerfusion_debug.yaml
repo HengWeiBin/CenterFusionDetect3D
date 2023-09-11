@@ -5,10 +5,11 @@ CUDNN:
   ENABLED: true
 GPUS:                             # -1 for CPU
 - 0
-WORKERS: 4
-DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save debug images
-EVAL: false                       # only evaluate the val split and quit
+WORKERS: 0
+DEBUG: 1                          # 0: no debug, 1: show debug images, 2: save debug images
+EVAL: true                        # only evaluate the val split and quit
 RANDOM_SEED: 123
+MIXED_PRECISION: false
 CONF_THRESH: 0.3                  # confidence threshold
 
 DATASET:
@@ -32,9 +33,9 @@ DATASET:
     PILLAR_DIMS: (1.5, 0.2, 0.2)  # Radar pillar dimensions (h,w,l)
 
 MODEL:
-  LOAD_DIR: 'models/nuScenes_3Ddetection_e140.pth'
+  LOAD_DIR: 'models/centernet_baseline_e170.pth'
   ARCH: "dla_34"                  # model architecture
-  FREEZE_BACKBONE: true           # freeze the backbone network and only train heads
+  FREEZE_BACKBONE: false          # freeze the backbone network and only train heads
   FUSION_STRATEGY: 'middle' # TODO
   INPUT_SIZE: (448, 800)
   FRUSTUM: true                   # Enable frustum association
@@ -59,19 +60,18 @@ LOSS:
     VELOCITY: 1                   # velocity
 
 TRAIN:
-  BATCH_SIZE: 16
+  BATCH_SIZE: 12
   SHUFFLE: true                   # shuffle training dataloader
   EPOCHS: 60
   RESUME: false
   OPTIMIZER: adam
   LR: 2.5e-4
   LR_STEP: (50,)                  # drop learning rate step
-  SAVE_POINT: 20,40,50            # save model at these epochs
+  SAVE_INTERVALS: 10              # interval to save model
   VAL_INTERVALS: 1                # number of epochs to run validation
   SCALE_FACTOR: 16
 
 TEST:
   BATCH_SIZE: 1 # TODO: there is a bug in official code, batch size cannot be larger
   K: 100                          # max number of output objects
-  FOCAL_LENGTH: -1                # -1 use default focal length
   OFFICIAL_EVAL: true             # use official evaluation script

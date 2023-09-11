@@ -1,4 +1,4 @@
-NAME: CenterFusion_Baseline
+NAME: CenterFusionFull
 CUDNN:
   BENCHMARK: true
   DETERMINISTIC: false
@@ -10,6 +10,8 @@ WORKERS: 4
 DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save debug images
 EVAL: false                       # only evaluate the val split and quit
 RANDOM_SEED: 0
+MIXED_PRECISION: false
+CONF_THRESH: 0.3                  # confidence threshold
 
 DATASET:
   DATASET: 'nuscenes'             # currently support nuscenes only
@@ -21,7 +23,7 @@ DATASET:
   ROTATE: 0                       # rotation augmentation
   FLIP: 0.5                       # flip augmentation
   COLOR_AUG: true                 # color augmenation from CornerNet
-  TRAIN_SPLIT: 'train'       # ['train','mini_train']
+  TRAIN_SPLIT: 'train'            # ['train','mini_train']
   VAL_SPLIT: 'mini_val'           # ['val','mini_val','test']
   NUSCENES:
     RADAR_PC: true                # use radar point cloud
@@ -57,19 +59,18 @@ LOSS:
     VELOCITY: 1                   # velocity
 
 TRAIN:
-  BATCH_SIZE: 26
+  BATCH_SIZE: 128
   SHUFFLE: true                   # shuffle training dataloader
-  EPOCHS: 60
+  EPOCHS: 230
   RESUME: false
   OPTIMIZER: adam
   LR: 2.5e-4
-  LR_STEP: (50,)                  # drop learning rate step
-  SAVE_POINT: 20,40,50            # save model at these epochs
+  LR_STEP: (220,)                 # drop learning rate step
+  SAVE_INTERVALS: 10              # interval to save model
   VAL_INTERVALS: 10               # number of epochs to run validation
   SCALE_FACTOR: 16
 
 TEST:
   BATCH_SIZE: 1 # TODO: there is a bug in official code, batch size cannot be larger
   K: 100                          # max number of output objects
-  FOCAL_LENGTH: -1                # -1 use default focal length
   OFFICIAL_EVAL: true             # use official evaluation script

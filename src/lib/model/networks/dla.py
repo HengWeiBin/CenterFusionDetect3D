@@ -390,25 +390,31 @@ class DeformConv(nn.Module):
         )
 
         # Declare offset layer and initialize to 0
-        self.conv_offset = nn.Conv2d(
-            in_channels, 18, kernel_size=3, stride=1, padding=1
+        self.conv_offset_mask = nn.Conv2d(
+            in_channels, 27, kernel_size=3, stride=1, padding=1
         )
-        nn.init.constant_(self.conv_offset.weight, 0)
-
-        # Declare mask layer and initialize to 0.5
-        self.conv_mask = nn.Conv2d(in_channels, 9, kernel_size=3, stride=1, padding=1)
-        nn.init.constant_(self.conv_mask.weight, 0.5)
+        nn.init.constant_(self.conv_offset_mask.weight, 0)
+        nn.init.constant_(self.conv_offset_mask.bias, 0)
 
         # Declare activation function
         self.activation = nn.Sequential(
             nn.BatchNorm2d(out_channels, momentum=0.1), nn.ReLU(inplace=True)
         )
 
+    # dla_up.ida_1.proj_1.conv.conv_offset_mask.weight.
     def forward(self, x):
-        offset = self.conv_offset(x)
-        mask = torch.sigmoid(self.conv_mask(x))
+        offset_mask = self.conv_offset_mask(x)
+        offset1, offset2, mask = torch.chunk(offset_mask, 3, dim=1)
+        offset = torch.cat((offset1, offset2), dim=1)
+        mask = torch.sigmoid(mask)
         x = deform_conv2d(
-            input=x, offset=offset, mask=mask, weight=self.conv.weight, padding=(1, 1)
+            input=x,
+            offset=offset,
+            mask=mask,
+            weight=self.conv.weight,
+            stride=1,
+            padding=1,
+            dilation=1,
         )
         x = self.activation(x)
         return x

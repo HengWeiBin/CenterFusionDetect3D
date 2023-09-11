@@ -196,9 +196,9 @@ class nuScenes(GenericDataset):
                         trans_matrix,
                         np.array(
                             [
-                                item["loc"][0],
-                                item["loc"][1] - size[2],
-                                item["loc"][2],
+                                item["location"][0],
+                                item["location"][1] - size[2],
+                                item["location"][2],
                                 1,
                             ],
                             np.float32,
@@ -209,11 +209,11 @@ class nuScenes(GenericDataset):
                 tracking_id = item["tracking_id"] if "tracking_id" in item else 1
 
                 if not ("rotation" in item):
-                    rot_cam = Quaternion(axis=[0, 1, 0], angle=item["rot_y"])
-                    loc = np.array(
-                        [item["loc"][0], item["loc"][1], item["loc"][2]], np.float32
+                    rot_cam = Quaternion(axis=[0, 1, 0], angle=item["yaw"])
+                    location = np.array(
+                        [item["location"][0], item["location"][1], item["location"][2]], np.float32
                     )
-                    box = Box(loc, size, rot_cam, name="2", token="1")
+                    box = Box(location, size, rot_cam, name="2", token="1")
                     box.translate(np.array([0, -box.wlh[2] / 2, 0]))
                     box.rotate(Quaternion(image_info["cs_record_rot"]))
                     box.translate(np.array(image_info["cs_record_trans"]))
@@ -317,7 +317,7 @@ class nuScenes(GenericDataset):
             + "--dataroot data/nuscenes/ "
             + f"--version {version} "
             + f"--plot_examples {n_plots} "
-            + "--render_curves 1 "
+            + "--render_curves 0 "
         )
 
         return output_dir

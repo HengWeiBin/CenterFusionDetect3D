@@ -44,11 +44,11 @@ def loadModel(model, config, optimizer=None):
         optimizer : torch.optim.Optimizer
         start_epoch : int
     """
-    start_epoch = 0
     checkpoint = torch.load(
         config.MODEL.LOAD_DIR, map_location=lambda storage, _: storage
     )
-    print("loaded {}, epoch {}".format(config.MODEL.LOAD_DIR, checkpoint["epoch"]))
+    start_epoch = checkpoint["epoch"] if "epoch" in checkpoint else 0
+    print("loaded {}, epoch {}".format(config.MODEL.LOAD_DIR, start_epoch))
     state_dict_ = checkpoint["state_dict"]
     state_dict = {}
 
@@ -62,21 +62,25 @@ def loadModel(model, config, optimizer=None):
 
     # check loaded parameters and created model parameters
     for k in state_dict:
-        if k in model_state_dict:
-            if state_dict[k].shape != model_state_dict[k].shape:
+        newK = toggleWeightName(k, to="new")
+        if k in model_state_dict or newK in model_state_dict:
+            if state_dict[k].shape != model_state_dict[newK].shape:
                 print(
                     "Skip loading parameter {}, required shape{}, "
                     "loaded shape{}.".format(
-                        k, model_state_dict[k].shape, state_dict[k].shape
+                        k, model_state_dict[newK].shape, state_dict[k].shape
                     )
                 )
-                state_dict[k] = model_state_dict[k]
+                state_dict[k] = model_state_dict[newK]
         else:
             print("Drop parameter {}.".format(k))
+
+    # load weights with non-strick mode if possible
     for k in model_state_dict:
-        if not (k in state_dict):
+        oldK = toggleWeightName(k, to="old")
+        if k not in state_dict and oldK not in state_dict:
             print("No param {}.".format(k))
-            state_dict[k] = model_state_dict[k]
+            state_dict[oldK] = model_state_dict[k]
     model.load_state_dict(state_dict, strict=False)
 
     # freeze backbone network
@@ -90,7 +94,6 @@ def loadModel(model, config, optimizer=None):
     # resume optimizer parameters
     if optimizer is not None and config.TRAIN.RESUME:
         if "optimizer" in checkpoint:
-            start_epoch = checkpoint["epoch"]
             start_lr = config.TRAIN.LR
             for step in config.TRAIN.LR_STEP:
                 if start_epoch >= step:
@@ -100,7 +103,53 @@ def loadModel(model, config, optimizer=None):
             print("Resumed optimizer with start lr", start_lr)
         else:
             print("No optimizer parameters in checkpoint.")
+            
     if optimizer is not None:
-        return model, optimizer, start_epoch
+        return checkpoint, model, optimizer, start_epoch
     else:
-        return model
+        return checkpoint, model, None, start_epoch
+
+
+def toggleWeightName(name, to="new"):
+    """
+    Transform the name of pretrained weights to new or old model name.
+
+    Args:
+        name : str
+        to : str
+            "new" or "old"
+
+    Returns:
+        name : str
+    """
+    oldToNew = {
+        "dep_sec": "depth2",
+        "rot_sec": "rotation2",
+        "hm": "heatmap",
+        "wh": "widthHeight",
+        "dep": "depth",
+        "dim": "dimension",
+        "rot": "rotation",
+        "amodel_offset": "amodal_offset",
+        "actf": "activation",
+        "conv.conv_offset_mask": "conv_offset_mask",
+    }
+    if to not in ["new", "old"]:
+        raise ValueError("to must be new or old")
+    
+    newToOld = {v: k for k, v in oldToNew.items()}
+    toggleDict = oldToNew if to == "new" else newToOld
+    
+    # return name if it is already a new name
+    if to == "new":
+        for value in oldToNew.values():
+            if value in name and value != "conv_offset_mask":
+                return name
+
+    # transform name
+    for k, v in toggleDict.items():
+        if k in name:
+            name = name.replace(k, v)
+            break
+
+    return name

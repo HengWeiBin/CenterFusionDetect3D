@@ -105,7 +105,7 @@ def updateConvNumOfHeads(config):
     Returns:
         None
     """
-    head_conv = {head: [256 if head != "reg" else 1] for head in config.heads}
+    head_conv = {head: [256] for head in config.heads}
     head_conv.update(
         {
             "depth2": [256, 256, 256],

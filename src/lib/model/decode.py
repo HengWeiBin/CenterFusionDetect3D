@@ -21,7 +21,7 @@ def fusionDecode(output, K=100):
         return {}
 
     heat = output["heatmap"]
-    batch, nclass, height, width = heat.size()
+    batch, nclass, _, _ = heat.size()
 
     heat = nms(heat)
     scores, indices, classes, ys0, xs0 = topk(heat, K=K)

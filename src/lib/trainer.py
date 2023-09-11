@@ -4,11 +4,12 @@ from __future__ import print_function
 
 import torch
 from torch.nn import DataParallel
+from torch.cuda.amp import autocast, GradScaler
 import numpy as np
 from tqdm import tqdm
 import psutil
 
-from utils import AverageMeter
+from utils import AverageMeter, saveModel
 from model import fusionDecode
 from model.losses import (
     FastFocalLoss,
@@ -19,8 +20,12 @@ from model.losses import (
 )
 from model.utils import sigmoid
 from utils.postProcess import postProcess
+from utils.wandb import WandbLogger
 
-# from utils.debugger import Debugger
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 
 class GenericLoss(torch.nn.Module):
@@ -153,6 +158,7 @@ class Trainer(object):
         self.optimizer = optimizer
         self.loss_stats, self.loss = self.getLossFunction(config)
         self.model = ModelWithLoss(model, self.loss, config)
+        self.scaler = GradScaler(enabled=config.MIXED_PRECISION)
 
     def setDevice(self, config):
         """
@@ -164,7 +170,12 @@ class Trainer(object):
         Returns:
             None.
         """
-        self.device = torch.device("cuda" if config.GPUS[0] != -1 else "cpu")
+        if config.GPUS[0] != -1:
+            torch.cuda.set_device(config.GPUS[0])
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
+
         if len(config.GPUS) > 1:
             self.model = DataParallel(self.model, device_ids=config.GPUS).to(
                 self.device
@@ -202,6 +213,7 @@ class Trainer(object):
             for loss in self.loss_stats
             if loss == "total" or self.config.weights[loss] > 0
         }
+        wandbLog = {}
 
         # progress bar
         pbar_title_indent = " " * (16 if phase == "train" else 13)
@@ -213,21 +225,23 @@ class Trainer(object):
         pbar = tqdm(dataloader, desc=phase)
 
         # Start iterating over batches
-        for batch in pbar:
+        for step, batch in enumerate(pbar):
             for k in batch:
                 if k != "meta":
                     batch[k] = batch[k].to(device=self.device, non_blocking=True)
 
             # run one iteration
-            output, loss, loss_stats = model(batch)
+            with autocast(enabled=self.config.MIXED_PRECISION):
+                output, loss, loss_stats = model(batch)
             for k in loss_stats.keys():
                 loss_stats[k] = loss_stats[k].mean().item()
 
             # backpropagate and step optimizer
             if phase == "train":
                 self.optimizer.zero_grad(set_to_none=True)
-                loss.mean().backward()
-                self.optimizer.step()
+                self.scaler.scale(loss.mean()).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
 
             pbar_msg = f"{phase} epoch {epoch}: "
             for loss in avgLossStats:
@@ -236,9 +250,6 @@ class Trainer(object):
             mem_used = psutil.virtual_memory()[3] / 1e9
             pbar_msg += f"{mem_used:9.2f}"
             pbar.set_description(pbar_msg)
-
-            # if self.config.DEBUG > 0: # TODO
-            #     self.debug(batch, output, iter_id, dataset=dataloader.dataset)
 
             # generate detections for evaluation
             if phase == "val" and (self.config.TEST.OFFICIAL_EVAL or self.config.EVAL):
@@ -258,7 +269,6 @@ class Trainer(object):
                     output["heatmap"].shape[3],
                     calib,
                 )
-
                 # merge results
                 result = []
                 for i in range(len(detects[0])):
@@ -270,6 +280,24 @@ class Trainer(object):
                 img_id = meta["img_id"].numpy().astype(np.int32)[0]
                 results[img_id] = result
 
+                # Log visualize results to wandb
+                WandbLogger.addGroundTruth(
+                    dataloader.dataset.coco,
+                    dataloader.dataset.img_dir,
+                    img_id,
+                    batch["pc_hm"][0],
+                    config=self.config,
+                )
+                WandbLogger.addPredict(result, output["pc_hm"][0], calib[0])
+
+            # Log to wandb
+            elif phase == "train" and wandb and wandb.run:
+                wandbLog = {
+                    f"train/{loss}": avgLossStats[loss].avg for loss in avgLossStats
+                }
+                if step != len(dataloader) - 1:
+                    wandb.log(wandbLog, step=(step + 1) + (epoch - 1) * len(dataloader))
+
         # Log epoch results
         for loss in avgLossStats:
             if phase not in log:
@@ -277,6 +305,12 @@ class Trainer(object):
             if loss not in log[phase]:
                 log[phase][loss] = []
             log[phase][loss].append(avgLossStats[loss].avg)
+
+            if phase == "val":
+                wandbLog[f"val/{loss}"] = avgLossStats[loss].avg
+
+        if wandb and wandb.run:
+            wandb.log(wandbLog, step=epoch * len(dataloader))
         log["memory"].append(mem_used)
         logger.info(pbar_msg)
 
@@ -310,155 +344,11 @@ class Trainer(object):
         loss = GenericLoss(config)
         return loss_states, loss
 
-        # def debug(self, batch, output, iter_id, dataset):
-        opt = self.opt
-        dets = fusionDecode(output, K=opt.K, opt=opt)
-        for k in dets:
-            dets[k] = dets[k].detach().cpu().numpy()
-        dets_gt = batch["meta"]["gt_det"]
-        for i in range(1):
-            debugger = Debugger(opt=opt, dataset=dataset)
-            img = batch["image"][i].detach().cpu().numpy().transpose(1, 2, 0)
-            img = np.clip(((img * dataset.std + dataset.mean) * 255.0), 0, 255).astype(
-                np.uint8
-            )
-            pred = debugger.gen_colormap(output["hm"][i].detach().cpu().numpy())
-            gt = debugger.gen_colormap(batch["hm"][i].detach().cpu().numpy())
-            debugger.add_blend_img(img, pred, "pred_hm", trans=self.opt.hm_transparency)
-            debugger.add_blend_img(img, gt, "gt_hm", trans=self.opt.hm_transparency)
-
-            debugger.add_img(img, img_id="img")
-
-            # show point clouds
-            if opt.pointcloud:
-                pc_2d = batch["pc_2d"][i].detach().cpu().numpy()
-                pc_3d = None
-                pc_N = batch["pc_N"][i].detach().cpu().numpy()
-                debugger.add_img(img, img_id="pc")
-                debugger.add_pointcloud(pc_2d, pc_N, img_id="pc")
-
-                if "pc_hm" in opt.pc_feat_lvl:
-                    channel = opt.pc_feat_channels["pc_hm"]
-                    pc_hm = debugger.gen_colormap(
-                        batch["pc_hm"][i][channel].unsqueeze(0).detach().cpu().numpy()
-                    )
-                    debugger.add_blend_img(
-                        img, pc_hm, "pc_hm", trans=self.opt.hm_transparency
-                    )
-                if "pc_dep" in opt.pc_feat_lvl:
-                    channel = opt.pc_feat_channels["pc_dep"]
-                    pc_hm = (
-                        batch["pc_hm"][i][channel].unsqueeze(0).detach().cpu().numpy()
-                    )
-                    pc_dep = debugger.add_overlay_img(img, pc_hm, "pc_dep")
-
-            debugger.add_img(img, img_id="out_pred")
-
-            # Predictions
-            for k in range(len(dets["scores"][i])):
-                if dets["scores"][i, k] > opt.vis_thresh:
-                    debugger.add_coco_bbox(
-                        dets["bboxes"][i, k] * opt.down_ratio,
-                        dets["clses"][i, k],
-                        dets["scores"][i, k],
-                        img_id="out_pred",
-                    )
-
-            # Ground truth
-            debugger.add_img(img, img_id="out_gt")
-            for k in range(len(dets_gt["scores"][i])):
-                if dets_gt["scores"][i][k] > opt.vis_thresh:
-                    if "depth" in dets_gt.keys():
-                        dist = dets_gt["depth"][i][k]
-                        if len(dist) > 1:
-                            dist = dist[0]
-                    else:
-                        dist = -1
-                    debugger.add_coco_bbox(
-                        dets_gt["bboxes"][i][k] * opt.down_ratio,
-                        dets_gt["clses"][i][k],
-                        dets_gt["scores"][i][k],
-                        img_id="out_gt",
-                        dist=dist,
-                    )
-
-            if (
-                "rotation" in opt.heads
-                and "dimension" in opt.heads
-                and "depth" in opt.heads
-            ):
-                dets_gt = {k: dets_gt[k].cpu().numpy() for k in dets_gt}
-                calib = (
-                    batch["meta"]["calib"].detach().numpy()
-                    if "calib" in batch["meta"]
-                    else None
-                )
-                det_pred = postProcess(
-                    opt,
-                    dets,
-                    batch["meta"]["c"].cpu().numpy(),
-                    batch["meta"]["s"].cpu().numpy(),
-                    output["hm"].shape[2],
-                    output["hm"].shape[3],
-                    calib,
-                )
-                det_gt = postProcess(
-                    opt,
-                    dets_gt,
-                    batch["meta"]["c"].cpu().numpy(),
-                    batch["meta"]["s"].cpu().numpy(),
-                    output["hm"].shape[2],
-                    output["hm"].shape[3],
-                    calib,
-                    is_gt=True,
-                )
-
-                debugger.add_3d_detection(
-                    batch["meta"]["img_path"][i],
-                    batch["meta"]["flipped"][i],
-                    det_pred[i],
-                    calib[i],
-                    vis_thresh=opt.vis_thresh,
-                    img_id="add_pred",
-                )
-                debugger.add_3d_detection(
-                    batch["meta"]["img_path"][i],
-                    batch["meta"]["flipped"][i],
-                    det_gt[i],
-                    calib[i],
-                    vis_thresh=opt.vis_thresh,
-                    img_id="add_gt",
-                )
-
-                pc_3d = None
-                if opt.pointcloud:
-                    pc_3d = batch["pc_3d"].cpu().numpy()
-
-                debugger.add_bird_views(
-                    det_pred[i],
-                    det_gt[i],
-                    vis_thresh=opt.vis_thresh,
-                    img_id="bird_pred_gt",
-                    pc_3d=pc_3d,
-                    show_velocity=opt.show_velocity,
-                )
-                debugger.add_bird_views(
-                    [],
-                    det_gt[i],
-                    vis_thresh=opt.vis_thresh,
-                    img_id="bird_gt",
-                    pc_3d=pc_3d,
-                    show_velocity=opt.show_velocity,
-                )
-
-            if opt.debug == 4:
-                debugger.save_all_imgs(opt.debug_dir, prefix="{}".format(iter_id))
-            else:
-                debugger.show_all_imgs(pause=True)
-
     @torch.no_grad()
     def val(self, epoch, dataloader, logger, log):
-        return self.runEpoch("val", epoch, dataloader, logger, log)
+        predicts = self.runEpoch("val", epoch, dataloader, logger, log)
+        WandbLogger.syncVisualizeResult()  # Log images to wandb
+        return predicts
 
     def train(self, epoch, dataloader, logger, log):
         return self.runEpoch("train", epoch, dataloader, logger, log)

@@ -80,10 +80,10 @@ CAT_IDS = {v: i + 1 for i, v in enumerate(CATS)}
 
 def _rot_y2alpha(rot_y, x, cx, fx):
     """
-    Get rotation_y by alpha + theta - 180
+    Get rotation yaw by alpha + theta - 180
     alpha : Observation angle of object, ranging [-pi..pi]
     x : Object center x to the camera center (x-W/2), in pixels
-    rotation_y : Rotation ry around Y-axis in camera coordinates [-pi..pi]
+    yaw : Rotation ry around Y-axis in camera coordinates [-pi..pi]
     """
     alpha = rot_y - np.arctan2(x - cx, fx)
     if alpha > np.pi:
@@ -269,7 +269,7 @@ def main():
                             "depth": box.center[2],
                             "occluded": 0,
                             "truncated": 0,
-                            "rotation_y": yaw,
+                            "yaw": yaw,
                             "amodal_center": amodal_center,
                             "iscrowd": 0,
                             "track_id": track_id,
@@ -341,7 +341,7 @@ def main():
                                 lineType=cv2.LINE_AA,
                             )
                             box_3d = get3dBox(
-                                ann["dimension"], ann["location"], ann["rotation_y"]
+                                ann["dimension"], ann["location"], ann["yaw"]
                             )
                             box_2d = project3DPoints(box_3d, calib)
                             img_3d = draw3DBox(img_3d, box_2d)

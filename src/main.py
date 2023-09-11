@@ -17,6 +17,11 @@ from dataset import getDataset
 from model import getModel, loadModel
 from trainer import Trainer
 
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -29,7 +34,7 @@ def parse_args():
     parser.add_argument(
         "opts",
         help="Modify config options using the command-line",
-        default=None,
+        default=None,   
         nargs=argparse.REMAINDER,
     )
 
@@ -62,10 +67,10 @@ def main():
     cudnn.enabled = config.CUDNN.ENABLED
     if torch.cuda.device_count() < len(config.GPUS):
         logger.critical(
-            f"Not enough available gpu! {torch.cuda.device_count()} < {len(config.gpus)}"
+            f"Not enough available gpu! {torch.cuda.device_count()} < {len(config.GPUS)}"
         )
         raise RuntimeError(
-            f"Not enough available gpu! {torch.cuda.device_count()} < {len(config.gpus)}"
+            f"Not enough available gpu! {torch.cuda.device_count()} < {len(config.GPUS)}"
         )
     if len(config.GPUS):
         device = torch.device("cuda")
@@ -80,11 +85,13 @@ def main():
     model = getModel(config)
     optimizer = getOptimizer(config, model)
     start_epoch = 0
+    log = {}
     lr = config.TRAIN.LR
     if config.MODEL.LOAD_DIR != "":
-        model, optimizer, start_epoch = loadModel(model, config, optimizer)
+        log, model, optimizer, start_epoch = loadModel(model, config, optimizer)
     trainer = Trainer(config, model, optimizer)
     trainer.setDevice(config)
+    log.update({"memory": []})
 
     val_loader = torch.utils.data.DataLoader(
         dataset(config, config.DATASET.VAL_SPLIT, device),
@@ -96,7 +103,7 @@ def main():
     if config.EVAL:
         # Run evaluation only
         with torch.no_grad():
-            preds = trainer.val(epoch, val_loader, logger, log)
+            preds = trainer.val(1, val_loader, logger, log)
         val_loader.dataset.run_eval(preds, output_dir)
         return
 
@@ -107,11 +114,15 @@ def main():
         num_workers=config.WORKERS,
         drop_last=True,
     )
-    log = {"memory": []}
 
     for epoch in range(start_epoch + 1, config.TRAIN.EPOCHS + 1):
         # train
         trainer.train(epoch, train_loader, logger, log)
+
+        # save model
+        if config.TRAIN.SAVE_INTERVALS > 0 and epoch % config.TRAIN.SAVE_INTERVAL == 0:
+            saveModel(log, model, epoch, os.path.join(output_dir, f"model_{epoch}.pt"))
+        saveModel(log, model, epoch, os.path.join(output_dir, "model_last.pt"))
 
         # validation
         if config.TRAIN.VAL_INTERVALS > 0 and epoch % config.TRAIN.VAL_INTERVALS == 0:
@@ -122,6 +133,7 @@ def main():
             if config.TEST.OFFICIAL_EVAL:
                 val_loader.dataset.run_eval(preds, output_dir)
 
+                # log validation result
                 with open(
                     os.path.join(
                         output_dir,
@@ -131,20 +143,15 @@ def main():
                     "r",
                 ) as f:
                     metrics = json.load(f)
-                logger.info(f'AP/overall: {metrics["mean_ap"]*100.0}')
+                logger.info(f'AP/overall: {metrics["mean_ap"]*100.0}%')
 
                 for k, v in metrics["mean_dist_aps"].items():
-                    print(f"AP/{k}: {v * 100.0}")
+                    print(f"AP/{k}: {v * 100.0}%")
 
                 for k, v in metrics["tp_errors"].items():
                     print(f"Scores/{k}: {v}")
 
                 logger.info(f'Scores/NDS: {metrics["nd_score"]}')
-
-        # save model
-        if epoch in config.TRAIN.SAVE_POINT:
-            saveModel(log, model, epoch, os.path.join(output_dir, f"model_{epoch}.pt"))
-        saveModel(log, model, epoch, os.path.join(output_dir, "model_last.pt"))
 
         # adjust learning rate
         if epoch in config.TRAIN.LR_STEP:
@@ -158,4 +165,17 @@ def main():
 
 if __name__ == "__main__":
     parse_args()
+    if wandb is not None:
+        wandb.init(
+            config=config,
+            resume="allow",
+            project="CenterFusionDetect3D",
+            name=config.NAME,
+            job_type="train" if not config.EVAL else "eval",
+        )
+    else:
+        print("wandb is not installed, wandb logging is disabled")
+
     main()
+    if wandb is not None:
+        wandb.finish()
