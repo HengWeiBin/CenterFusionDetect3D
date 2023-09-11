@@ -27,6 +27,7 @@
 - [License](#license)
 
 ## What's new
+- `Our code is not compatible with old model because of deformable convolution layer, we will upload the new weight and traning result soon.`
 - Added tqdm for **better visualization** of training, validation and evaluation
 - Improved **readability** of code **significantly**
 - Improved **readability** and versatility of parameters
