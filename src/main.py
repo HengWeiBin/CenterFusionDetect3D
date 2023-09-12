@@ -121,8 +121,8 @@ def main():
 
         # save model
         if config.TRAIN.SAVE_INTERVALS > 0 and epoch % config.TRAIN.SAVE_INTERVAL == 0:
-            saveModel(log, model, epoch, os.path.join(output_dir, f"model_{epoch}.pt"))
-        saveModel(log, model, epoch, os.path.join(output_dir, "model_last.pt"))
+            saveModel(log, model, epoch, os.path.join(output_dir, f"model_{epoch}.pt"), optimizer)
+        saveModel(log, model, epoch, os.path.join(output_dir, "model_last.pt"), optimizer)
 
         # validation
         if config.TRAIN.VAL_INTERVALS > 0 and epoch % config.TRAIN.VAL_INTERVALS == 0:
