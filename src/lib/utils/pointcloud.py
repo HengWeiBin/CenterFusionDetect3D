@@ -222,15 +222,15 @@ def cvtAlphaToRotateY(alpha, objCenterX, imgCenterX, focalLength):
     if all(
         isinstance(arg, torch.Tensor) for arg in [objCenterX, imgCenterX, focalLength]
     ):
-        rot_y = alpha + torch.atan2(objCenterX - imgCenterX, focalLength)
+        yaw = alpha + torch.atan2(objCenterX - imgCenterX, focalLength)
     else:
-        rot_y = alpha + np.arctan2(objCenterX - imgCenterX, focalLength)
-
-    if rot_y > 3.14159:
-        rot_y -= 2 * 3.14159
-    if rot_y < -3.14159:
-        rot_y += 2 * 3.14159
-    return rot_y
+        yaw = alpha + np.arctan2(objCenterX - imgCenterX, focalLength)
+    
+    if yaw > 3.14159:
+        yaw -= 2 * 3.14159
+    if yaw < -3.14159:
+        yaw += 2 * 3.14159
+    return yaw
 
 
 def get3DCorners(dim, rotation_y):
@@ -331,8 +331,8 @@ def getPcFrustumHeatmap(output, pc_dep, calib, config):
     rot = transposeAndGetFeature(output["rotation"], indices).view(batch, K, -1)
 
     # Draw heatmap
-    for i, [pc_dep_b, bboxes_b, depth_b, dim_b, rot_b] in enumerate(
-        zip(pc_dep, bboxes, dep, dims, rot)
+    for i, [pc_dep_b, bboxes_b, depth_b, dim_b, rot_b, calib_b] in enumerate(
+        zip(pc_dep, bboxes, dep, dims, rot, calib)
     ):
         alpha_b = get_alpha(rot_b).unsqueeze(1)
 
@@ -341,7 +341,7 @@ def getPcFrustumHeatmap(output, pc_dep, calib, config):
                 [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2],
                 device=pc_dep_b.device,
             )
-            distanceThreshold = getDistanceThresh(calib, center, dim, alpha)
+            distanceThreshold = getDistanceThresh(calib_b, center, dim, alpha)
             cvtPcDepthToHeatmap(
                 pc_hm[i],
                 pc_dep_b,

@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 import psutil
 
-from utils import AverageMeter, saveModel
+from utils import AverageMeter
 from model import fusionDecode
 from model.losses import (
     FastFocalLoss,
@@ -208,12 +208,12 @@ class Trainer(object):
             torch.cuda.empty_cache()
 
         results = {}
+        wandbLog = {}
         avgLossStats = {
             loss: AverageMeter()
             for loss in self.loss_stats
             if loss == "total" or self.config.weights[loss] > 0
         }
-        wandbLog = {}
 
         # progress bar
         pbar_title_indent = " " * (16 if phase == "train" else 13)
@@ -253,12 +253,11 @@ class Trainer(object):
 
             # generate detections for evaluation
             if phase == "val" and (self.config.TEST.OFFICIAL_EVAL or self.config.EVAL):
-                meta = batch["meta"]
                 detects = fusionDecode(output, K=self.config.TEST.K)
-
                 for k in detects:
                     detects[k] = detects[k].detach().cpu().numpy()
 
+                meta = batch["meta"]
                 calib = meta["calib"].detach().numpy() if "calib" in meta else None
                 detects = postProcess(
                     self.config,
@@ -269,16 +268,18 @@ class Trainer(object):
                     output["heatmap"].shape[3],
                     calib,
                 )
-                # merge results
-                result = []
-                for i in range(len(detects[0])):
-                    if detects[0][i]["score"] > self.config.CONF_THRESH and all(
-                        detects[0][i]["dimension"] > 0
-                    ):
-                        result.append(detects[0][i])
 
-                img_id = meta["img_id"].numpy().astype(np.int32)[0]
-                results[img_id] = result
+                # merge results
+                for i in range(len(detects)):
+                    result = []
+                    for j in range(len(detects[i])):
+                        if detects[i][j]["score"] > self.config.CONF_THRESH and all(
+                            detects[i][j]["dimension"] > 0
+                        ):
+                            result.append(detects[i][j])
+
+                    img_id = meta["img_id"].numpy().astype(np.int32)[i]
+                    results[img_id] = result
 
                 # Log visualize results to wandb
                 WandbLogger.addGroundTruth(
@@ -347,7 +348,7 @@ class Trainer(object):
     @torch.no_grad()
     def val(self, epoch, dataloader, logger, log):
         predicts = self.runEpoch("val", epoch, dataloader, logger, log)
-        WandbLogger.syncVisualizeResult()  # Log images to wandb
+        WandbLogger.syncVisualizeResult()
         return predicts
 
     def train(self, epoch, dataloader, logger, log):

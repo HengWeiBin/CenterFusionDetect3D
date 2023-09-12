@@ -101,42 +101,34 @@ class GenericDataset(torch.utils.data.Dataset):
         """
         item:
             image: image after augmentation
+            calib: camera matrix
+            pc_2d: radar point cloud in image coordinate
+            pc_3d: radar point cloud in camera coordinate
+            pc_N: number of radar point cloud
+            pc_dep: radar point cloud depth
+            heatmap: heatmap for each class
+            indices: indices for get feature map
             classIds: class id
             mask: all mask show which data is valid
+            pc_hm: radar point cloud heatmap [depth, vel_x, vel_z]
             widthHeight: width and height of bounding box (w, h)
             widthHeight_mask: all mask show which data is valid
-            indices: indices for get feature map
             reg: diffence between center(float) and center_int
             reg_mask: all mask show which data is valid
-            heatmap: heatmap for each class
-            nuscenes_att: nuscenes attribute (mask)
-            nuscenes_att_mask: nuscenes attribute (range mask)
-            velocity: velocity
-            velocity_mask: velocity mask
             depth: depth(m)
             depth_mask: depth mask
             dimension: dimension of object (h, w, l)
             dimension_mask: dimension mask
             amodal_offset: amodal offset from bbox center
             amodal_offset_mask: amodal offset mask
-            pc_hm: radar point cloud heatmap [depth, vel_x, vel_z]
-            pc_dep: radar point cloud depth
+            nuscenes_att: nuscenes attribute (mask)
+            nuscenes_att_mask: nuscenes attribute (range mask)
+            velocity: velocity
+            velocity_mask: velocity mask
             rotbin: rotation bin
             rotres: rotation residual
             rotation_mask: rotation mask
-
-        target:
-            bboxes
-            scores
-            classIds
-            centers
-            nuscenes_att
-            velocity
-            depth
-            dimension
-            amodal_offset
-            reg
-            rotation
+            meta: meta data
         """
         # ====== Load Image and Annotation ====== #
         img, anns, img_info, img_path = self.loadImageAnnotation(
@@ -200,11 +192,12 @@ class GenericDataset(torch.utils.data.Dataset):
             )
 
         # ====== Initialize the return variables ====== #
-        target = {"bboxes": [], "scores": [], "classIds": [], "centers": []}
+        # target = {"bboxes": [], "scores": [], "classIds": [], "centers": []}
+        target = {}
         self.initReturn(item, target)
         num_objs = min(len(anns), self.max_objs)
-        for k in range(num_objs):
-            ann = anns[k]
+        for i in range(num_objs):
+            ann = anns[i]
             classId = int(self.class_ids[ann["category_id"]])
 
             if classId > self.num_categories or classId <= -999:
@@ -218,7 +211,7 @@ class GenericDataset(torch.utils.data.Dataset):
             self.addInstance(
                 item,
                 target,
-                k,
+                i,
                 classId - 1,
                 bbox,
                 ann,
@@ -228,8 +221,6 @@ class GenericDataset(torch.utils.data.Dataset):
 
         # ====== Debug ====== #
         if self.config.DEBUG > 0 or self.enable_meta:
-            target = self.formatGroundtruth(target)
-
             # get velocity transformation matrix
             if "velocity_trans_matrix" in img_info:
                 velocity_mat = np.array(
@@ -407,7 +398,7 @@ class GenericDataset(torch.utils.data.Dataset):
         )
         result = result.astype(np.float32) / 255.0
         result = result.transpose(2, 0, 1)
-        result = torch.from_numpy(result)#.to(self.device) # TODO
+        result = torch.from_numpy(result)  # .to(self.device) # TODO
         if "train" in self.split and self.config.DATASET.COLOR_AUG:
             result = self.colorAugmentor(result)
         return result
@@ -422,18 +413,6 @@ class GenericDataset(torch.utils.data.Dataset):
 
         Returns:
             None
-
-            bboxes
-            scores
-            classIds
-            centers
-            nuscenes_att
-            velocity
-            depth
-            dimension
-            amodal_offset
-            reg
-            rotation
         """
         item["heatmap"] = np.zeros(
             (
@@ -446,6 +425,11 @@ class GenericDataset(torch.utils.data.Dataset):
         item["indices"] = np.zeros((self.max_objs), dtype=np.int64)
         item["classIds"] = np.zeros((self.max_objs), dtype=np.int64)
         item["mask"] = np.zeros((self.max_objs), dtype=np.float32)
+
+        target["bboxes"] = np.zeros((self.max_objs, 4), dtype=np.float32)
+        target["scores"] = np.zeros((self.max_objs), dtype=np.float32)
+        target["classIds"] = np.zeros((self.max_objs), dtype=np.int64)
+        target["centers"] = np.zeros((self.max_objs, 2), dtype=np.float32)
 
         if self.config.DATASET.NUSCENES.RADAR_PC:
             item["pc_hm"] = np.zeros(
@@ -475,13 +459,15 @@ class GenericDataset(torch.utils.data.Dataset):
                 item[head + "_mask"] = np.zeros(
                     (self.max_objs, regression_head_dims[head]), dtype=np.float32
                 )
-                target[head] = []
+                target[head] = np.zeros(
+                    (self.max_objs, regression_head_dims[head]), dtype=np.float32
+                )
 
         if "rotation" in self.config.heads:
             item["rotbin"] = np.zeros((self.max_objs, 2), dtype=np.int64)
             item["rotres"] = np.zeros((self.max_objs, 2), dtype=np.float32)
             item["rotation_mask"] = np.zeros((self.max_objs), dtype=np.float32)
-            target.update({"rotation": []})
+            target["rotation"] = np.zeros((self.max_objs, 8), dtype=np.float32)
 
     def _mask_ignore_or_crowd(self, item, classId, bbox):
         """
@@ -549,7 +535,7 @@ class GenericDataset(torch.utils.data.Dataset):
         self,
         item,
         target,
-        k,
+        i,
         classId,
         bbox,
         ann,
@@ -569,83 +555,81 @@ class GenericDataset(torch.utils.data.Dataset):
         )
         center_int = center.astype(np.int32)
 
-        item["classIds"][k] = classId
-        item["mask"][k] = 1
+        item["classIds"][i] = classId
+        item["mask"][i] = 1
         if "widthHeight" in item:
-            item["widthHeight"][k] = float(width), float(height)
-            item["widthHeight_mask"][k] = 1
-        item["indices"][k] = (
+            item["widthHeight"][i] = float(width), float(height)
+            item["widthHeight_mask"][i] = 1
+        item["indices"][i] = (
             center_int[1] * self.config.MODEL.OUTPUT_SIZE[1] + center_int[0]
         )
-        item["reg"][k] = center - center_int
-        item["reg_mask"][k] = 1
+        item["reg"][i] = center - center_int
+        item["reg_mask"][i] = 1
         drawGaussianHeatRegion(item["heatmap"][classId], center_int, radius)
 
-        target["bboxes"].append(
-            np.array(
-                [
-                    center[0] - width / 2,
-                    center[1] - height / 2,
-                    center[0] + width / 2,
-                    center[1] + height / 2,
-                ],
-                dtype=np.float32,
-            )
+        target["bboxes"][i] = np.array(
+            [
+                center[0] - width / 2,
+                center[1] - height / 2,
+                center[0] + width / 2,
+                center[1] + height / 2,
+            ],
+            dtype=np.float32,
         )
-        target["scores"].append(1)
-        target["classIds"].append(classId)
-        target["centers"].append(center)
+        target["scores"][i] = 1
+        target["classIds"][i] = classId
+        target["centers"][i] = center
 
         if "nuscenes_att" in self.config.heads:
             if ("attributes" in ann) and ann["attributes"] > 0:
                 att = int(ann["attributes"] - 1)
-                item["nuscenes_att"][k][att] = 1
-                item["nuscenes_att_mask"][k][self.nuscenes_att_range[att]] = 1
-            target["nuscenes_att"].append(item["nuscenes_att"][k])
+                item["nuscenes_att"][i][att] = 1
+                item["nuscenes_att_mask"][i][self.nuscenes_att_range[att]] = 1
+            target["nuscenes_att"][i] = item["nuscenes_att"][i]
 
         if "velocity" in self.config.heads:
             if ("velocity_cam" in ann) and min(ann["velocity_cam"]) > -1000:
-                item["velocity"][k] = np.array(ann["velocity_cam"], np.float32)[:3]
-                item["velocity_mask"][k] = 1
-            target["velocity"].append(item["velocity"][k])
+                item["velocity"][i] = np.array(ann["velocity_cam"], np.float32)[:3]
+                item["velocity_mask"][i] = 1
+            target["velocity"][i] = item["velocity"][i]
 
         if "rotation" in self.config.heads:
             if "alpha" in ann:
-                item["rotation_mask"][k] = 1
+                item["rotation_mask"][i] = 1
                 alpha = ann["alpha"]
                 if alpha < np.pi / 6.0 or alpha > 5 * np.pi / 6.0:
-                    item["rotbin"][k, 0] = 1
-                    item["rotres"][k, 0] = alpha - (-0.5 * np.pi)
+                    item["rotbin"][i, 0] = 1
+                    item["rotres"][i, 0] = alpha - (-0.5 * np.pi)
                 if alpha > -np.pi / 6.0 or alpha < -5 * np.pi / 6.0:
-                    item["rotbin"][k, 1] = 1
-                    item["rotres"][k, 1] = alpha - (0.5 * np.pi)
-                target["rotation"].append(self.processAlpha(ann["alpha"]))
+                    item["rotbin"][i, 1] = 1
+                    item["rotres"][i, 1] = alpha - (0.5 * np.pi)
+                target["rotation"][i] = self.processAlpha(ann["alpha"])
             else:
-                target["rotation"].append(self.processAlpha(0))
+                target["rotation"][i] = self.processAlpha(0)
 
         if "depth" in self.config.heads and "depth" in ann:
-            item["depth"][k] = ann["depth"] * scaleFactor
-            item["depth_mask"][k] = 1
-            target["depth"].append(item["depth"][k])
+            item["depth"][i] = ann["depth"] * scaleFactor
+            item["depth_mask"][i] = 1
+            target["depth"][i] = item["depth"][i]
 
         if "dimension" in self.config.heads:
             if "dimension" in ann:
-                item["dimension"][k] = ann["dimension"]
-                item["dimension_mask"][k] = 1
-                target["dimension"].append(item["dimension"][k])
+                item["dimension"][i] = ann["dimension"]
+                item["dimension_mask"][i] = 1
+                target["dimension"][i] = item["dimension"][i]
             else:
-                target["dimension"].append([1, 1, 1])
+                target["dimension"][i] = [1, 1, 1]
 
         if "amodal_offset" in self.config.heads:
             if "amodal_center" in ann:
                 amodal_center = affineTransform(
                     np.array(ann["amodal_center"]).reshape(1, -1), transMatOutput
                 )
-                item["amodal_offset"][k] = amodal_center - center_int
-                item["amodal_offset_mask"][k] = 1
-                target["amodal_offset"].append(item["amodal_offset"][k])
+                item["amodal_offset"][i] = amodal_center - center_int
+                item["amodal_offset_mask"][i] = 1
+                target["amodal_offset"][i] = item["amodal_offset"][i]
             else:
-                target["amodal_offset"].append([0, 0])
+                target["amodal_offset"][i] = [0, 0]
 
         if self.config.DATASET.NUSCENES.RADAR_PC:
             if self.config.MODEL.FRUSTUM:
@@ -685,29 +669,6 @@ class GenericDataset(torch.utils.data.Dataset):
             ret[5] = 1
             ret[6], ret[7] = np.sin(r), np.cos(r)
         return ret
-
-    def formatGroundtruth(self, target):
-        """
-        This function formats the ground truth.
-        Turn the target dictionary into a dictionary of numpy arrays.
-
-        Args:
-            target (dict): The target d
-            ctionary.
-
-        Returns:
-            dict: The formatted target dictionary.
-        """
-        if len(target["scores"]) == 0:
-            target = {
-                "bboxes": np.array([[0, 0, 1, 1]], dtype=np.float32),
-                "scores": np.array([1], dtype=np.float32),
-                "classIds": np.array([0], dtype=np.float32),
-                "centers": np.array([[0, 0]], dtype=np.float32),
-                "bboxes_amodal": np.array([[0, 0]], dtype=np.float32),
-            }
-        target = {k: np.array(target[k], dtype=np.float32) for k in target}
-        return target
 
     def loadRadarPointCloud(
         self, img, img_info, transMatInput, transMatOutput, isFlipped=False

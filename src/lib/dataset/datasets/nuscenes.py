@@ -3,21 +3,14 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import pycocotools.coco as coco
-from pycocotools.cocoeval import COCOeval
 from pyquaternion import Quaternion
 import numpy as np
-import torch
 import json
 import os
-from tqdm import tqdm
-import cv2
 
 from ..generic_dataset import GenericDataset
-from nuscenes.utils.geometry_utils import view_points
 from nuscenes.utils.data_classes import Box
 from nuscenes.nuscenes import NuScenes
-from itertools import compress
 
 class nuScenes(GenericDataset):
     default_resolution = [900, 1600]

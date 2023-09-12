@@ -8,7 +8,7 @@ GPUS:                             # -1 for CPU
 WORKERS: 0
 DEBUG: 1                          # 0: no debug, 1: show debug images, 2: save debug images
 EVAL: true                        # only evaluate the val split and quit
-RANDOM_SEED: 123
+RANDOM_SEED: 0
 MIXED_PRECISION: false
 CONF_THRESH: 0.3                  # confidence threshold
 
@@ -72,6 +72,6 @@ TRAIN:
   SCALE_FACTOR: 16
 
 TEST:
-  BATCH_SIZE: 1 # TODO: there is a bug in official code, batch size cannot be larger
+  BATCH_SIZE: 24
   K: 100                          # max number of output objects
   OFFICIAL_EVAL: true             # use official evaluation script

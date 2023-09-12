@@ -59,7 +59,7 @@ LOSS:
     VELOCITY: 1                   # velocity
 
 TRAIN:
-  BATCH_SIZE: 128
+  BATCH_SIZE: 64
   SHUFFLE: true                   # shuffle training dataloader
   EPOCHS: 170
   RESUME: true                    # resume training from checkpoint
@@ -71,6 +71,6 @@ TRAIN:
   SCALE_FACTOR: 16
 
 TEST:
-  BATCH_SIZE: 1 # TODO: there is a bug in official code, batch size cannot be larger
+  BATCH_SIZE: 128
   K: 100                          # max number of output objects
   OFFICIAL_EVAL: true             # use official evaluation script
