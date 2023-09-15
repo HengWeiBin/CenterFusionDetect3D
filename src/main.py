@@ -96,7 +96,7 @@ def main():
     val_loader = torch.utils.data.DataLoader(
         dataset(config, config.DATASET.VAL_SPLIT, device),
         batch_size=config.TEST.BATCH_SIZE,
-        shuffle=False,
+        shuffle=True,
         num_workers=config.WORKERS,
     )
 
@@ -155,7 +155,7 @@ def main():
 
         # adjust learning rate
         if epoch in config.TRAIN.LR_STEP:
-            lr = config.TRAIN.LR * (0.1 ** config.TRAIN.LR_STEP.index(epoch) + 1)
+            lr = config.TRAIN.LR * (0.1 ** (config.TRAIN.LR_STEP.index(epoch) + 1))
             logger.info(f"Changing learning rate to {lr}")
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr

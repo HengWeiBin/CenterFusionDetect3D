@@ -202,13 +202,10 @@ class Trainer(object):
         if phase == "train":
             model.train()
         else:
-            if len(self.config.GPUS) > 1:
-                model = self.model.module
             model.eval()
             torch.cuda.empty_cache()
 
         results = {}
-        wandbLog = {}
         avgLossStats = {
             loss: AverageMeter()
             for loss in self.loss_stats
@@ -281,25 +278,15 @@ class Trainer(object):
                     img_id = meta["img_id"].numpy().astype(np.int32)[i]
                     results[img_id] = result
 
-                # Log visualize results to wandb
-                WandbLogger.addGroundTruth(
-                    dataloader.dataset.coco,
-                    dataloader.dataset.img_dir,
-                    img_id,
-                    batch["pc_hm"][0],
-                    config=self.config,
-                )
-                WandbLogger.addPredict(result, output["pc_hm"][0], calib[0])
-
             # Log to wandb
-            elif phase == "train" and wandb and wandb.run:
+            elif step and phase == "train" and wandb and wandb.run:
                 wandbLog = {
                     f"train/{loss}": avgLossStats[loss].avg for loss in avgLossStats
                 }
-                if step != len(dataloader) - 1:
-                    wandb.log(wandbLog, step=(step + 1) + (epoch - 1) * len(dataloader))
-
+                wandb.log(wandbLog, step=(step + 1) + (epoch - 1) * len(dataloader))
+            
         # Log epoch results
+        wandbLog = {}
         for loss in avgLossStats:
             if phase not in log:
                 log[phase] = {}
@@ -310,8 +297,18 @@ class Trainer(object):
             if phase == "val":
                 wandbLog[f"val/{loss}"] = avgLossStats[loss].avg
 
-        if wandb and wandb.run:
-            wandb.log(wandbLog, step=epoch * len(dataloader))
+        if phase == "val":
+            # Log visualize results to wandb
+            WandbLogger.addGroundTruth(
+                dataloader.dataset,
+                img_id,
+                batch["pc_hm"][-1],
+                config=self.config,
+            )
+            WandbLogger.addPredict(result, output["pc_hm"][-1], calib[-1])
+            WandbLogger.log.update(wandbLog)
+            WandbLogger.syncVisualizeResult()
+
         log["memory"].append(mem_used)
         logger.info(pbar_msg)
 

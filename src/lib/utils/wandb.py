@@ -5,10 +5,13 @@ from __future__ import print_function
 import cv2
 import numpy as np
 import os
+from nuscenes.eval.common.data_classes import EvalBoxes
+from nuscenes.eval.detection.data_classes import DetectionBox
+from nuscenes.eval.common.loaders import load_gt, add_center_dist, filter_eval_boxes
+from nuscenes.eval.common.config import config_factory
+from nuscenes.eval.detection.render import visualize_sample
 
-from model import fusionDecode
 from utils.ddd import get3dBox, project3DPoints, draw3DBox
-from utils import postProcess
 
 try:
     import wandb
@@ -18,10 +21,15 @@ except ImportError:
 
 class WandbLogger:
     image = None
+    imgId = None
+    dataset = None
     targetPcHmOverlay = None
     targetBox3DOverlay = None
     predPcHmOverlay = None
     predBox3DOverlay = None
+    bev = None
+    sampleToken = None
+    log = {}
 
     @staticmethod
     def reset():
@@ -29,13 +37,18 @@ class WandbLogger:
         Reset logger
         """
         WandbLogger.image = None
+        WandbLogger.imgId = None
+        WandbLogger.dataset = None
         WandbLogger.targetPcHmOverlay = None
         WandbLogger.targetBox3DOverlay = None
         WandbLogger.predPcHmOverlay = None
         WandbLogger.predBox3DOverlay = None
+        WandbLogger.bev = None
+        WandbLogger.sampleToken = None
+        WandbLogger.log = {}
 
     @staticmethod
-    def addGroundTruth(coco, imageDir, imageId, pc_hm, config):
+    def addGroundTruth(dataset, imageId, pc_hm, config):
         """
         Add ground truth to be logged
 
@@ -45,25 +58,31 @@ class WandbLogger:
         Returns:
             None
         """
-        if WandbLogger.image is None:
-            imageInfo = coco.loadImgs(ids=[imageId])[0]
-            ann_ids = coco.getAnnIds(imgIds=[imageId])
-            anns = coco.loadAnns(ids=ann_ids)
+        if WandbLogger.image is not None:
+            return
 
-            image = cv2.imread(os.path.join(imageDir, imageInfo["file_name"]))
-            WandbLogger.image = cv2.resize(
-                image,
-                (config.MODEL.INPUT_SIZE[1], config.MODEL.INPUT_SIZE[0]),
-            )
+        # Save image id and dataset for render bev
+        WandbLogger.imgId = imageId
+        WandbLogger.dataset = dataset
 
-            WandbLogger.drawPcHeatmap(
-                pc_hm.cpu().numpy().transpose(1, 2, 0), isTarget=True
-            )
-            WandbLogger.drawBox3D(
-                {"predictBoxes": anns, "calib": imageInfo["calib"]},
-                config,
-                isTarget=True,
-            )
+        # Get image info and annotations
+        imageInfo = dataset.coco.loadImgs(ids=[imageId])[0]
+        ann_ids = dataset.coco.getAnnIds(imgIds=[imageId])
+        anns = dataset.coco.loadAnns(ids=ann_ids)
+        WandbLogger.sampleToken = imageInfo["sample_token"]
+
+        # Read and resize image
+        image = cv2.imread(os.path.join(dataset.img_dir, imageInfo["file_name"]))
+        WandbLogger.image = cv2.resize(
+            image,
+            (config.MODEL.INPUT_SIZE[1], config.MODEL.INPUT_SIZE[0]),
+        )
+
+        # Render ground truth
+        WandbLogger.drawPcHeatmap(pc_hm.cpu().numpy().transpose(1, 2, 0), isTarget=True)
+        WandbLogger.drawBox3D(
+            {"predictBoxes": anns, "calib": imageInfo["calib"]}, isTarget=True
+        )
 
     @staticmethod
     def addPredict(predictBoxes, pc_hm, calib):
@@ -78,13 +97,16 @@ class WandbLogger:
         Returns:
             None
         """
-        if WandbLogger.predPcHmOverlay is None:
-            WandbLogger.drawPcHeatmap(
-                pc_hm.cpu().numpy().transpose(1, 2, 0), isTarget=False
-            )
-            WandbLogger.drawBox3D(
-                {"predictBoxes": predictBoxes, "calib": calib}, None, isTarget=False
-            )
+        if WandbLogger.predPcHmOverlay is not None:
+            return
+
+        WandbLogger.renderNuscBev(predictBoxes)
+        WandbLogger.drawPcHeatmap(
+            pc_hm.cpu().numpy().transpose(1, 2, 0), isTarget=False
+        )
+        WandbLogger.drawBox3D(
+            {"predictBoxes": predictBoxes, "calib": calib}, isTarget=False
+        )
 
     @staticmethod
     def drawPcHeatmap(pc_hm, isTarget: bool):
@@ -112,13 +134,13 @@ class WandbLogger:
             WandbLogger.predPcHmOverlay = image
 
     @staticmethod
-    def drawBox3D(batch, config, isTarget: bool):
+    def drawBox3D(batch, isTarget: bool):
         """
         Draw 3D bounding box on input image
 
         Args:
             batch: batch of data
-            config: config file
+            isTarget: whether the box is ground truth or prediction
 
         Returns:
             None
@@ -143,11 +165,36 @@ class WandbLogger:
             WandbLogger.predBox3DOverlay = image
 
     @staticmethod
+    def renderNuscBev(predictBoxes):
+        nusc = WandbLogger.dataset.nusc
+        cfg = config_factory("detection_cvpr_2019")
+        nuscResult = WandbLogger.dataset.convert_eval_format(
+            {WandbLogger.imgId: predictBoxes}
+        )
+        nuscPredBoxes = EvalBoxes.deserialize(nuscResult["results"], DetectionBox)
+        nuscGtBoxes = load_gt(nusc, WandbLogger.dataset.split, DetectionBox)
+        nuscPredBoxes = add_center_dist(nusc, nuscPredBoxes)
+        nuscGtBoxes = add_center_dist(nusc, nuscGtBoxes)
+        nuscPredBoxes = filter_eval_boxes(nusc, nuscPredBoxes, cfg.class_range)
+        nuscGtBoxes = filter_eval_boxes(nusc, nuscGtBoxes, cfg.class_range)
+        visualize_sample(
+            nusc,
+            WandbLogger.sampleToken,
+            nuscGtBoxes,
+            nuscPredBoxes,
+            eval_range=max(cfg.class_range.values()),
+            savepath="./tempNuscBev.png",
+        )
+        WandbLogger.bev = cv2.imread("./tempNuscBev.png")
+        if os.path.exists("./tempNuscBev.png"):
+            os.remove("./tempNuscBev.png")
+
+    @staticmethod
     def syncVisualizeResult():
         """
         Log visualization result to wandb
         """
-        if not (wandb and wandb.run):
+        if WandbLogger.image is None or not (wandb and wandb.run):
             return
 
         images = [
@@ -155,13 +202,20 @@ class WandbLogger:
             WandbLogger.targetBox3DOverlay,
             WandbLogger.predPcHmOverlay,
             WandbLogger.predBox3DOverlay,
+            WandbLogger.bev,
         ]
-        titles = ["target/pc_hm", "target/box_3d", "pred/pc_hm", "pred/box_3d"]
+        titles = ["target/pc_hm", "target/box_3d", "pred/pc_hm", "pred/box_3d", "bev"]
 
         wandbImages = []
         for i in range(len(images)):
+            if images[i] is None:
+                print(f"Warning: {titles[i]} is None")
+                continue
             images[i] = cv2.cvtColor(images[i], cv2.COLOR_BGR2RGB)
             wandbImages.append(wandb.Image(images[i], caption=f"{titles[i]}"))
-        wandb.log({"val/boxes": wandbImages})
+        WandbLogger.log.update({"val/boxes": wandbImages[:4]})
+        WandbLogger.log.update({"val/bev": wandbImages[4]})
+        wandb.log(WandbLogger.log)
+        print(f"Visualized {WandbLogger.sampleToken}")
 
         WandbLogger.reset()

@@ -310,7 +310,7 @@ class nuScenes(GenericDataset):
             + "--dataroot data/nuscenes/ "
             + f"--version {version} "
             + f"--plot_examples {n_plots} "
-            + "--render_curves 0 "
+            + "--render_curves 1 "
         )
 
         return output_dir

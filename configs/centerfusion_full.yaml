@@ -71,6 +71,6 @@ TRAIN:
   SCALE_FACTOR: 16
 
 TEST:
-  BATCH_SIZE: 1 # TODO: there is a bug in official code, batch size cannot be larger
+  BATCH_SIZE: 128
   K: 100                          # max number of output objects
   OFFICIAL_EVAL: true             # use official evaluation script

@@ -89,6 +89,9 @@ The code has been tested on WSL 2 Ubuntu 22.04.2 with Python 3.9.17, CUDA 12.2 a
    ```bash
    cd $CF_ROOT
    pip install -r requirements.txt
+   
+   cd $CF_ROOT/src
+   git clone https://github.com/nutonomy/nuscenes-devkit
    ```
 
 ## Dataset Preparation

@@ -63,7 +63,8 @@ def loadModel(model, config, optimizer=None):
     # check loaded parameters and created model parameters
     for k in state_dict:
         newK = toggleWeightName(k, to="new")
-        if k in model_state_dict or newK in model_state_dict:
+        newK = newK if newK in model_state_dict else k
+        if newK in model_state_dict:
             if state_dict[k].shape != model_state_dict[newK].shape:
                 print(
                     "Skip loading parameter {}, required shape{}, "
