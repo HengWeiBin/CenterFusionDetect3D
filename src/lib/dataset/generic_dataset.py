@@ -192,7 +192,6 @@ class GenericDataset(torch.utils.data.Dataset):
             )
 
         # ====== Initialize the return variables ====== #
-        # target = {"bboxes": [], "scores": [], "classIds": [], "centers": []}
         target = {}
         self.initReturn(item, target)
         num_objs = min(len(anns), self.max_objs)
@@ -802,13 +801,12 @@ class GenericDataset(torch.utils.data.Dataset):
             depth = point[2]
             center = np.array([point[0], point[1]])
             method = self.config.DATASET.NUSCENES.PC_ROI_METHOD
-
             if method == "pillars":
                 bbox = [
-                    max(center[1] - pillar_wh[:, i][1], 0),
-                    center[1],
-                    max(center[0] - pillar_wh[:, i][0] / 2, 0),
-                    min(center[0] + pillar_wh[:, i][0] / 2, outputWidth),
+                    max(center[1] - pillar_wh[1, i], 0),  # y1
+                    center[1],  # y2
+                    max(center[0] - pillar_wh[0, i] / 2, 0),  # x1
+                    min(center[0] + pillar_wh[0, i] / 2, outputWidth),  # x2
                 ]
 
             elif method == "heatmap":
@@ -1000,11 +998,11 @@ class GenericDataset(torch.utils.data.Dataset):
 
             # Draw pillar box on input image
             pillarTopLInput = (
-                np.min(int(point[0] - pillarInputWh[0, i] / 2), 0),
-                np.min(int(point[1] - pillarInputWh[1, i]), 0),
+                max(int(point[0] - pillarInputWh[0, i] / 2), 0),
+                max(int(point[1] - pillarInputWh[1, i]), 0),
             )
             pillarBotRInput = (
-                np.min(int(point[0] + pillarInputWh[0, i] / 2), 0),
+                min(int(point[0] + pillarInputWh[0, i] / 2), inputWidth),
                 int(point[1]),
             )
 
@@ -1015,11 +1013,11 @@ class GenericDataset(torch.utils.data.Dataset):
 
             # Draw pillar box on original image
             pillarTopLOrigin = (
-                np.min(int(pc_2d[0, i] - pillarOriginWh[0, i] / 2), 0),
-                np.min(int(pc_2d[1, i] - pillarOriginWh[1, i]), 0),
+                max(int(pc_2d[0, i] - pillarOriginWh[0, i] / 2), 0),
+                max(int(pc_2d[1, i] - pillarOriginWh[1, i]), 0),
             )
             pillarBotROrigin = (
-                np.min(int(pc_2d[0, i] + pillarOriginWh[0, i] / 2), 0),
+                min(int(pc_2d[0, i] + pillarOriginWh[0, i] / 2), imgOrigin.shape[1]),
                 int(pc_2d[1, i]),
             )
 
@@ -1084,9 +1082,9 @@ class GenericDataset(torch.utils.data.Dataset):
         outputFunc(f"{dirHead}pillarInput3D.jpg", imgInput3D)
         outputFunc(f"{dirHead}pillarOriginMask.jpg", originMask)
         outputFunc(f"{dirHead}imgOrigin.jpg", img)
-        self.imgDebugIndex += 1
+        self.imgDebugIndex += 1 if outputFunc != cv2.imshow else 0
 
         key = cv2.waitKey(0)
-        cv2.destroyAllWindows()
         if key == 27:
+            cv2.destroyAllWindows()
             exit()

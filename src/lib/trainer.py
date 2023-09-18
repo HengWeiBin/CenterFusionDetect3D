@@ -298,14 +298,13 @@ class Trainer(object):
                 wandbLog[f"val/{loss}"] = avgLossStats[loss].avg
 
         if phase == "val":
-            # Log visualize results to wandb
             WandbLogger.addGroundTruth(
                 dataloader.dataset,
                 img_id,
-                batch["pc_hm"][-1],
+                batch["pc_hm"][-1][0],
                 config=self.config,
             )
-            WandbLogger.addPredict(result, output["pc_hm"][-1], calib[-1])
+            WandbLogger.addPredict(result, output["pc_hm"][-1][0], calib[-1])
             WandbLogger.log.update(wandbLog)
             WandbLogger.syncVisualizeResult()
 

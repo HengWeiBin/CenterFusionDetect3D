@@ -6,8 +6,10 @@ import os
 import torch
 from torch import nn
 from torch.utils import model_zoo
+from torch.nn.modules.utils import _pair
 import numpy as np
 from torchvision.ops import deform_conv2d
+import math
 
 from .base_model import BaseModel
 from model.utils import initConv2dWeights, initUpModuleWeights
@@ -381,27 +383,47 @@ class DeformConv(nn.Module):
     Deformable ConvNets v2: More Deformable, Better Results
     link: https://arxiv.org/abs/1811.11168
     """
-
     def __init__(self, in_channels, out_channels):
         super(DeformConv, self).__init__()
-        # Original conv layer
-        self.conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, stride=1, padding=1
-        )
-
-        # Declare offset layer and initialize to 0
-        self.conv_offset_mask = nn.Conv2d(
-            in_channels, 27, kernel_size=3, stride=1, padding=1
-        )
-        nn.init.constant_(self.conv_offset_mask.weight, 0)
-        nn.init.constant_(self.conv_offset_mask.bias, 0)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = _pair(3)
+        self.stride = _pair(1)
+        self.padding = _pair(1)
+        self.dilation = _pair(1)
 
         # Declare activation function
         self.activation = nn.Sequential(
             nn.BatchNorm2d(out_channels, momentum=0.1), nn.ReLU(inplace=True)
         )
 
-    # dla_up.ida_1.proj_1.conv.conv_offset_mask.weight.
+        # Declare offset and mask layer and initialize to 0
+        self.conv_offset_mask = nn.Conv2d(
+            in_channels,
+            3 * self.kernel_size[0] * self.kernel_size[1],
+            kernel_size=self.kernel_size,
+            stride=_pair(1),
+            padding=_pair(1),
+            bias=True,
+        )
+        self.conv_offset_mask.weight.data.zero_()
+        self.conv_offset_mask.bias.data.zero_()
+
+        self.weight = nn.Parameter(
+            torch.Tensor(out_channels, in_channels, *self.kernel_size)
+        )
+        self.bias = nn.Parameter(torch.Tensor(out_channels))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        n = self.in_channels
+        for k in self.kernel_size:
+            n *= k
+        stdv = 1.0 / math.sqrt(n)
+        self.weight.data.uniform_(-stdv, stdv)
+        if self.bias is not None:
+            self.bias.data.zero_()
+
     def forward(self, x):
         offset_mask = self.conv_offset_mask(x)
         offset1, offset2, mask = torch.chunk(offset_mask, 3, dim=1)
@@ -410,11 +432,12 @@ class DeformConv(nn.Module):
         x = deform_conv2d(
             input=x,
             offset=offset,
+            weight=self.weight,
+            bias=self.bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
             mask=mask,
-            weight=self.conv.weight,
-            stride=1,
-            padding=1,
-            dilation=1,
         )
         x = self.activation(x)
         return x
@@ -526,17 +549,6 @@ class DLASeg(BaseModel):
 
     def img2feats(self, x):
         x = self.base(x)
-        x = self.dla_up(x)
-
-        y = []
-        for i in range(self.last_level - self.first_level):
-            y.append(x[i].clone())
-        self.ida_up(y, 0, len(y))
-
-        return [y[-1]]
-
-    def imgpre2feats(self, x, pre_img=None, pre_hm=None):
-        x = self.base(x, pre_img, pre_hm)
         x = self.dla_up(x)
 
         y = []

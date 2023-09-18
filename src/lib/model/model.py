@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 import torch
+import re
 
 from .networks.dla import DLASeg
 
@@ -49,18 +50,19 @@ def loadModel(model, config, optimizer=None):
     )
     start_epoch = checkpoint["epoch"] if "epoch" in checkpoint else 0
     print("loaded {}, epoch {}".format(config.MODEL.LOAD_DIR, start_epoch))
-    state_dict_ = checkpoint["state_dict"]
-    state_dict = {}
 
     # convert data_parallal model to normal model
+    state_dict_ = checkpoint["state_dict"]
+    state_dict = {}
     for k in state_dict_:
         if k.startswith("module") and not k.startswith("module_list"):
             state_dict[k[7:]] = state_dict_[k]
         else:
             state_dict[k] = state_dict_[k]
-    model_state_dict = model.state_dict()
-
+    
     # check loaded parameters and created model parameters
+    model_state_dict = model.state_dict()
+    finalStateDict = {}
     for k in state_dict:
         newK = toggleWeightName(k, to="new")
         newK = newK if newK in model_state_dict else k
@@ -72,17 +74,19 @@ def loadModel(model, config, optimizer=None):
                         k, model_state_dict[newK].shape, state_dict[k].shape
                     )
                 )
-                state_dict[k] = model_state_dict[newK]
+                finalStateDict[newK] = model_state_dict[newK]
+            else:
+                finalStateDict[newK] = state_dict[k]
         else:
-            print("Drop parameter {}.".format(k))
+            print(f"Drop parameter {k}.")
 
     # load weights with non-strick mode if possible
     for k in model_state_dict:
         oldK = toggleWeightName(k, to="old")
         if k not in state_dict and oldK not in state_dict:
             print("No param {}.".format(k))
-            state_dict[oldK] = model_state_dict[k]
-    model.load_state_dict(state_dict, strict=False)
+            finalStateDict[k] = model_state_dict[k]
+    print(model.load_state_dict(finalStateDict, strict=False))
 
     # freeze backbone network
     if config.MODEL.FREEZE_BACKBONE:
@@ -104,7 +108,7 @@ def loadModel(model, config, optimizer=None):
             print("Resumed optimizer with start lr", start_lr)
         else:
             print("No optimizer parameters in checkpoint.")
-            
+
     if optimizer is not None:
         return checkpoint, model, optimizer, start_epoch
     else:
@@ -123,6 +127,9 @@ def toggleWeightName(name, to="new"):
     Returns:
         name : str
     """
+    if to not in ["new", "old"]:
+        raise ValueError("to must be new or old")
+
     oldToNew = {
         "dep_sec": "depth2",
         "rot_sec": "rotation2",
@@ -135,17 +142,32 @@ def toggleWeightName(name, to="new"):
         "actf": "activation",
         "conv.conv_offset_mask": "conv_offset_mask",
     }
-    if to not in ["new", "old"]:
-        raise ValueError("to must be new or old")
-    
+    oldUpNodeRegex = ".*_up.*_\d.conv.(weight|bias)"
+    newUpNodeRegex = ".*_up.*_\d.(weight|bias)"
+
     newToOld = {v: k for k, v in oldToNew.items()}
     toggleDict = oldToNew if to == "new" else newToOld
-    
+
     # return name if it is already a new name
     if to == "new":
         for value in oldToNew.values():
-            if value in name and value != "conv_offset_mask":
+            if (value in name and value != "conv_offset_mask") or (
+                re.match(oldUpNodeRegex, name) is None
+                and re.match(newUpNodeRegex, name) is not None
+            ):
                 return name
+
+        if re.match(oldUpNodeRegex, name) is not None:
+            name = name.replace("conv.weight", "weight")
+            name = name.replace("conv.bias", "bias")
+            return name
+    elif (
+        re.match(newUpNodeRegex, name) is not None
+        and re.match(oldUpNodeRegex, name) is None
+    ):
+        name = name.replace("weight", "conv.weight")
+        name = name.replace("bias", "conv.bias")
+        return name
 
     # transform name
     for k, v in toggleDict.items():

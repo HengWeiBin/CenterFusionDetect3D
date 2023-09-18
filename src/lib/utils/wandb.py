@@ -79,7 +79,7 @@ class WandbLogger:
         )
 
         # Render ground truth
-        WandbLogger.drawPcHeatmap(pc_hm.cpu().numpy().transpose(1, 2, 0), isTarget=True)
+        WandbLogger.drawPcHeatmap(pc_hm.cpu().numpy(), isTarget=True)
         WandbLogger.drawBox3D(
             {"predictBoxes": anns, "calib": imageInfo["calib"]}, isTarget=True
         )
@@ -102,7 +102,7 @@ class WandbLogger:
 
         WandbLogger.renderNuscBev(predictBoxes)
         WandbLogger.drawPcHeatmap(
-            pc_hm.cpu().numpy().transpose(1, 2, 0), isTarget=False
+            pc_hm.cpu().numpy(), isTarget=False
         )
         WandbLogger.drawBox3D(
             {"predictBoxes": predictBoxes, "calib": calib}, isTarget=False
@@ -121,8 +121,6 @@ class WandbLogger:
         """
         image = WandbLogger.image.copy()
         pc_hm = (pc_hm * 255).astype(np.uint8)
-        if pc_hm.shape[2] == 3:
-            pc_hm = cv2.cvtColor(pc_hm, cv2.COLOR_BGR2GRAY)
         input_shape = WandbLogger.image.shape
         pc_hm = cv2.resize(pc_hm, (input_shape[1], input_shape[0]))
         image[pc_hm > 0] = 0

@@ -36,8 +36,8 @@ def updateConfigHeads(config):
     heads = {
         # 2D heads
         "heatmap": config.DATASET.NUM_CLASSES,
-        "widthHeight": 2,
         "reg": 2,
+        "widthHeight": 2,
         # 3D heads
         "depth": 1,
         "rotation": 8,

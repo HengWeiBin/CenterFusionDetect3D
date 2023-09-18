@@ -120,7 +120,7 @@ def main():
         trainer.train(epoch, train_loader, logger, log)
 
         # save model
-        if config.TRAIN.SAVE_INTERVALS > 0 and epoch % config.TRAIN.SAVE_INTERVAL == 0:
+        if config.TRAIN.SAVE_INTERVALS > 0 and epoch % config.TRAIN.SAVE_INTERVALS == 0:
             saveModel(log, model, epoch, os.path.join(output_dir, f"model_{epoch}.pt"), optimizer)
         saveModel(log, model, epoch, os.path.join(output_dir, "model_last.pt"), optimizer)
 

@@ -206,9 +206,9 @@ def get_alpha(rot):
     return alpha
 
 
-def cvtAlphaToRotateY(alpha, objCenterX, imgCenterX, focalLength):
+def cvtAlphaToYaw(alpha, objCenterX, imgCenterX, focalLength):
     """
-    Get rotation_y by alpha + theta - 180
+    Get rotation yaw by alpha + theta - 180
 
     Args:
         alpha : Observation angle of object, ranging [-pi..pi]
@@ -217,7 +217,7 @@ def cvtAlphaToRotateY(alpha, objCenterX, imgCenterX, focalLength):
         focalLength: Camera focal length x, in pixels
 
     Return:
-        rotation_y : Rotation ry around Y-axis in camera coordinates [-pi..pi]
+        yaw : Rotation around Y-axis in camera coordinates [-pi..pi]
     """
     if all(
         isinstance(arg, torch.Tensor) for arg in [objCenterX, imgCenterX, focalLength]
@@ -274,8 +274,8 @@ def getDistanceThresh(calib, center, dim, alpha):
     Returns:
         The distance threshold for the object.
     """
-    rotation_y = cvtAlphaToRotateY(alpha, center[0], calib[0, 2], calib[0, 0])
-    corners_3d = get3DCorners(dim, rotation_y)
+    yaw = cvtAlphaToYaw(alpha, center[0], calib[0, 2], calib[0, 0])
+    corners_3d = get3DCorners(dim, yaw)
     dist_thresh = max(corners_3d[:, 2]) - min(corners_3d[:, 2]) / 2.0
     return dist_thresh
 
@@ -299,6 +299,7 @@ def getPcFrustumHeatmap(output, pc_dep, calib, config):
     _, indices, classes, ys, xs = topk(heatmap, K=K)
     xs = xs.view(batch, K, 1) + 0.5
     ys = ys.view(batch, K, 1) + 0.5
+    calib = calib.view(batch, 3, 4)
 
     ## get estimated depths
     out_dep = 1.0 / (output["depth"].sigmoid() + 1e-6) - 1.0
@@ -376,7 +377,7 @@ def cvtPcDepthToHeatmap(pc_hm, pc_dep, depth, bbox, distanceThreshold, max_pc_di
         )
     else:
         lib, toArray, nonzero = (np, np.array, np.nonzero)
-
+        
     if isinstance(depth, list) and len(depth) > 0:
         depth = depth[0]
 
@@ -418,12 +419,12 @@ def cvtPcDepthToHeatmap(pc_hm, pc_dep, depth, bbox, distanceThreshold, max_pc_di
             dist /= max_pc_dist  # normalize depth
 
             w = bbox[2] - bbox[0]
-            w_interval = 0.3 * w
+            w_interval = 0.3 * w # Heatmap to box ratio is 0.3
             w_min = int(center[0] - w_interval / 2.0)
             w_max = int(center[0] + w_interval / 2.0)
 
             h = bbox[3] - bbox[1]
-            h_interval = 0.3 * h
+            h_interval = 0.3 * h # Heatmap to box ratio is 0.3
             h_min = int(center[1] - h_interval / 2.0)
             h_max = int(center[1] + h_interval / 2.0)
 

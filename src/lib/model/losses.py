@@ -171,10 +171,10 @@ def compute_bin_loss(output, target, mask):
         output_nz = output.index_select(0, nonzero_idx)
         target_nz = target.index_select(0, nonzero_idx)
         return F.cross_entropy(output_nz, target_nz, reduction="mean")
-    else:  # loss would be NaN if computed normally when no annotation is given
-        return torch.tensor(
-            0.0
-        ).cuda()  # set to different grad_fn but not relevant since loss is zero
+    else:
+        # loss would be NaN if computed normally when no annotation is given
+        # set to different grad_fn but not relevant since loss is zero
+        return torch.tensor(0.0).cuda()
 
 
 def compute_rot_loss(output, target_bin, target_res, mask):

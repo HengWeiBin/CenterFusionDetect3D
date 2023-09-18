@@ -18,7 +18,7 @@ class BaseModel(nn.Module):
 
         last_channels = {head: last_channel for head in config.heads}
         for head in self.secondary_heads:
-            last_channels[head] = last_channel + 3  # 3=pc_dep channel
+            last_channels[head] = last_channel + 3  # 3 = pc_dep channel
 
         for head in self.heads:
             classes = self.heads[head]

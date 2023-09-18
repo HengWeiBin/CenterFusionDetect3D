@@ -4,3 +4,4 @@ output/
 .vscode/*
 *.pth
 wandb/
+*.pt
