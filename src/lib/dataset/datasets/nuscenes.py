@@ -12,6 +12,7 @@ from ..generic_dataset import GenericDataset
 from nuscenes.utils.data_classes import Box
 from nuscenes.nuscenes import NuScenes
 
+
 class nuScenes(GenericDataset):
     default_resolution = [900, 1600]
     num_categories = 10
@@ -30,9 +31,7 @@ class nuScenes(GenericDataset):
         "traffic_cone",
         "barrier",
     ]
-    class_ids = {
-        i + 1: i + 1 for i in range(num_categories)
-    }
+    class_ids = {i + 1: i + 1 for i in range(num_categories)}
 
     vehicles = ["car", "truck", "bus", "trailer", "construction_vehicle"]
     cycles = ["motorcycle", "bicycle"]
@@ -92,7 +91,7 @@ class nuScenes(GenericDataset):
         7: [5, 6, 7],
     }
 
-    def __init__(self, config, split, device):
+    def __init__(self, config, split):
         data_dir = os.path.join(config.DATASET.ROOT, "nuscenes")
 
         ann_path = os.path.join(data_dir, "annotations", "{}.json").format(split)
@@ -101,7 +100,7 @@ class nuScenes(GenericDataset):
             version=self.SPLITS[split], dataroot=data_dir, verbose=False
         )
 
-        super(nuScenes, self).__init__(config, split, ann_path, data_dir, device)
+        super(nuScenes, self).__init__(config, split, ann_path, data_dir)
 
         print("Loaded {} {} samples".format(split, len(self.images)))
 
@@ -204,7 +203,8 @@ class nuScenes(GenericDataset):
                 if not ("rotation" in item):
                     rot_cam = Quaternion(axis=[0, 1, 0], angle=item["yaw"])
                     location = np.array(
-                        [item["location"][0], item["location"][1], item["location"][2]], np.float32
+                        [item["location"][0], item["location"][1], item["location"][2]],
+                        np.float32,
                     )
                     box = Box(location, size, rot_cam, name="2", token="1")
                     box.translate(np.array([0, -box.wlh[2] / 2, 0]))
@@ -300,6 +300,8 @@ class nuScenes(GenericDataset):
             open(f"{save_dir}/results_nuscenes_det_{split}.json", "w"),
         )
 
+        # Call from nuscenes lib directly will cause error in multi-processing
+        # So we call it by os.system
         output_dir = f"{save_dir}/nuscenes_eval_det_output_{split}/"
         os.system(
             "python "

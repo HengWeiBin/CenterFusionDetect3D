@@ -52,7 +52,7 @@ def postProcess(
             centers[i], scales[i], 0, (width, height), inverse=True
         ).astype(np.float32)
         for j in range(len(detects["scores"][i])):
-            if detects["scores"][i][j] < config.CONF_THRESH:
+            if detects["scores"][i][j] < -1:
                 break
             item = {}
             item["score"] = detects["scores"][i][j]

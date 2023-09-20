@@ -290,7 +290,7 @@ def getPcFrustumHeatmap(output, pc_dep, calib, config):
         calib: calibration matrix
         config: config / options
     """
-    K = config.TEST.K
+    K = config.MODEL.K
     heatmap = output["heatmap"]
     widthHeight = output["widthHeight"]
     pc_hm = torch.zeros_like(pc_dep)

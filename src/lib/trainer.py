@@ -250,7 +250,7 @@ class Trainer(object):
 
             # generate detections for evaluation
             if phase == "val" and (self.config.TEST.OFFICIAL_EVAL or self.config.EVAL):
-                detects = fusionDecode(output, K=self.config.TEST.K)
+                detects = fusionDecode(output, K=self.config.MODEL.K)
                 for k in detects:
                     detects[k] = detects[k].detach().cpu().numpy()
 
@@ -270,7 +270,7 @@ class Trainer(object):
                 for i in range(len(detects)):
                     result = []
                     for j in range(len(detects[i])):
-                        if detects[i][j]["score"] > self.config.CONF_THRESH and all(
+                        if detects[i][j]["score"] > -1 and all(
                             detects[i][j]["dimension"] > 0
                         ):
                             result.append(detects[i][j])

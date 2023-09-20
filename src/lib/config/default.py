@@ -14,7 +14,6 @@ _Cfg.DEBUG = 0                                      # 0: no debug, 1: show debug
 _Cfg.EVAL = False                                   # only evaluate the val split and quit
 _Cfg.RANDOM_SEED = 0
 _Cfg.MIXED_PRECISION = False                        # FP16 training
-_Cfg.CONF_THRESH = 0.3                              # confidence threshold
 
 _Cfg.DATASET = CN()
 _Cfg.DATASET.DATASET = 'nuscenes'                   # currently support nuscenes only
@@ -43,6 +42,7 @@ _Cfg.MODEL.ARCH = "dla_34"                          # model architecture
 _Cfg.MODEL.FREEZE_BACKBONE = False                  # freeze the backbone network and only train heads
 _Cfg.MODEL.FUSION_STRATEGY = 'middle' # TODO
 _Cfg.MODEL.FRUSTUM = True                           # Enable frustum association
+_Cfg.MODEL.K = 100                                   # max number of output objects
 _Cfg.MODEL.INPUT_SIZE = (448, 800)
 
 _Cfg.MODEL.GENERIC_NET = CN()
@@ -53,7 +53,6 @@ _Cfg.MODEL.DLA = CN()
 _Cfg.MODEL.DLA.NODE = "DeformConv"                  # [DeformConv | GlobalConv | Conv]
 
 _Cfg.LOSS = CN()
-_Cfg.LOSS.REG_LOSS = 'l1'                           # regression loss: sl1 | l1 | l2
 _Cfg.LOSS.NUSCENES_ATT = True
 _Cfg.LOSS.VELOCITY = True
 
@@ -81,5 +80,4 @@ _Cfg.TRAIN.SCALE_FACTOR = 16
 
 _Cfg.TEST = CN()
 _Cfg.TEST.BATCH_SIZE = 1
-_Cfg.TEST.K = 100                                   # max number of output objects
 _Cfg.TEST.OFFICIAL_EVAL = False                     # use official evaluation script

@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument(
         "opts",
         help="Modify config options using the command-line",
-        default=None,   
+        default=None,
         nargs=argparse.REMAINDER,
     )
 
@@ -66,17 +66,11 @@ def main():
     cudnn.deterministic = config.CUDNN.DETERMINISTIC
     cudnn.enabled = config.CUDNN.ENABLED
     if torch.cuda.device_count() < len(config.GPUS):
-        logger.critical(
-            f"Not enough available gpu! {torch.cuda.device_count()} < {len(config.GPUS)}"
-        )
-        raise RuntimeError(
-            f"Not enough available gpu! {torch.cuda.device_count()} < {len(config.GPUS)}"
-        )
+        errorMsg = f"Not enough available gpu! {torch.cuda.device_count()} < {len(config.GPUS)}"
+        logger.critical(errorMsg)
+        raise RuntimeError(errorMsg)
     if len(config.GPUS):
-        device = torch.device("cuda")
         torch.multiprocessing.set_start_method("spawn")
-    else:
-        device = torch.device("cpu")
 
     dataset = getDataset(config.DATASET.DATASET)
     updateDatasetAndModelConfig(config, dataset, output_dir)
@@ -92,9 +86,11 @@ def main():
     trainer = Trainer(config, model, optimizer)
     trainer.setDevice(config)
     log.update({"memory": []})
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Number of parameters: {total_params}")
 
     val_loader = torch.utils.data.DataLoader(
-        dataset(config, config.DATASET.VAL_SPLIT, device),
+        dataset(config, config.DATASET.VAL_SPLIT),
         batch_size=config.TEST.BATCH_SIZE,
         shuffle=True,
         num_workers=config.WORKERS,
@@ -108,7 +104,7 @@ def main():
         return
 
     train_loader = torch.utils.data.DataLoader(
-        dataset(config, config.DATASET.TRAIN_SPLIT, device),
+        dataset(config, config.DATASET.TRAIN_SPLIT),
         batch_size=config.TRAIN.BATCH_SIZE,
         shuffle=config.TRAIN.SHUFFLE,
         num_workers=config.WORKERS,
@@ -121,8 +117,16 @@ def main():
 
         # save model
         if config.TRAIN.SAVE_INTERVALS > 0 and epoch % config.TRAIN.SAVE_INTERVALS == 0:
-            saveModel(log, model, epoch, os.path.join(output_dir, f"model_{epoch}.pt"), optimizer)
-        saveModel(log, model, epoch, os.path.join(output_dir, "model_last.pt"), optimizer)
+            saveModel(
+                log,
+                model,
+                epoch,
+                os.path.join(output_dir, f"model_{epoch}.pt"),
+                optimizer,
+            )
+        saveModel(
+            log, model, epoch, os.path.join(output_dir, "model_last.pt"), optimizer
+        )
 
         # validation
         if config.TRAIN.VAL_INTERVALS > 0 and epoch % config.TRAIN.VAL_INTERVALS == 0:

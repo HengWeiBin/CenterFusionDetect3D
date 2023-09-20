@@ -3,74 +3,75 @@ CUDNN:
   BENCHMARK: true
   DETERMINISTIC: false
   ENABLED: true
-GPUS:                             # -1 for CPU
+GPUS:
+- 0
 - 1
 - 2
-WORKERS: 4
-DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save debug images
-EVAL: false                       # only evaluate the val split and quit
+WORKERS: 6
+DEBUG: 0
+EVAL: false
 RANDOM_SEED: 0
-MIXED_PRECISION: false
-CONF_THRESH: 0.3                  # confidence threshold
+MIXED_PRECISION: true
 
 DATASET:
-  DATASET: 'nuscenes'             # currently support nuscenes only
+  DATASET: 'nuscenes'
   ROOT: data/
-  RANDOM_CROP: false              # random crop data augmentation from CornerNet
-  MAX_CROP: true                  # used when the training dataset has inbalanced aspect ratios
-  SHIFT: 0.2                      # shift augmentation
-  SCALE: 0                        # scale augmentation
-  ROTATE: 0                       # rotation augmentation
-  FLIP: 0.5                       # flip augmentation
-  COLOR_AUG: true                 # color augmenation from CornerNet
-  TRAIN_SPLIT: 'train'            # ['train','mini_train']
-  VAL_SPLIT: 'mini_val'           # ['val','mini_val','test']
+  RANDOM_CROP: false
+  MAX_CROP: true
+  SHIFT: 0.2
+  SCALE: 0
+  ROTATE: 0
+  FLIP: 0.5
+  COLOR_AUG: true
+  TRAIN_SPLIT: 'train'
+  VAL_SPLIT: 'val'
   NUSCENES:
-    RADAR_PC: true                # use radar point cloud
-    MAX_PC: 1000                  # maximum number of points in the point cloud
-    MAX_PC_DIST: 60.0             # remove points beyond max_pc_dist (meters)
-    PC_Z_OFFSET: 0.0              # raise all Radar points in z direction
-    PC_ROI_METHOD: 'pillars'      # pillars or heatmap
-    PILLAR_DIMS: (1.5, 0.2, 0.2)  # Radar pillar dimensions (h,w,l)
+    RADAR_PC: false
+    MAX_PC: 1000
+    MAX_PC_DIST: 60.0
+    PC_Z_OFFSET: 0.0
+    PC_ROI_METHOD: 'pillars'
+    PILLAR_DIMS: (1.5, 0.2, 0.2)
 
 MODEL:
   LOAD_DIR: 'models/nuScenes_3Ddetection_e140.pth'
-  ARCH: "dla_34"                  # model architecture
-  FREEZE_BACKBONE: true          # freeze the backbone network and only train heads
+  ARCH: "dla_34"
+  FREEZE_BACKBONE: true
   FUSION_STRATEGY: 'middle' # TODO
   INPUT_SIZE: (448, 800)
-  FRUSTUM: true                   # Enable frustum association
+  FRUSTUM: true
+  K: 100
   GENERIC_NET:
     BACKBONE: "dla34"
     NECK: "dlaup"
+  DLA:
+    NODE: "DeformConv"
 
 LOSS:
-  REG_LOSS: 'l1'                  # regression loss: sl1 | l1 | l2
-  NUSCENES_ATT: true
+  NUSCENES_ATT: false
   VELOCITY: true
   WEIGHTS:
-    HEATMAP: 1                    # keypoint heatmaps
-    AMODAL_OFFSET: 1              # keypoint local offsets
-    BBOX: 0.1                     # bounding box size
-    DEPTH: 1                      # depthloss weight for depth
-    DIMENSION: 1                  # 3d bounding box size
-    ROTATION: 1                   # orientation
-    NUSCENES_ATT: 1               # nuscenes attribute
-    VELOCITY: 1                   # velocity
+    HEATMAP: 1
+    AMODAL_OFFSET: 1
+    BBOX: 0.1
+    DEPTH: 1
+    DIMENSION: 1
+    ROTATION: 1
+    NUSCENES_ATT: 1
+    VELOCITY: 1
 
 TRAIN:
-  BATCH_SIZE: 64
-  SHUFFLE: true                   # shuffle training dataloader
+  BATCH_SIZE: 128
+  SHUFFLE: true
   EPOCHS: 170
-  RESUME: true                    # resume training from checkpoint
+  RESUME: true
   OPTIMIZER: adam
   LR: 2.5e-4
-  LR_STEP: (50,)                  # drop learning rate step
-  SAVE_INTERVALS: 10              # interval to save model
-  VAL_INTERVALS: 10               # number of epochs to run validation
+  LR_STEP: (220,)
+  SAVE_INTERVALS: 10
+  VAL_INTERVALS: 5
   SCALE_FACTOR: 16
 
 TEST:
-  BATCH_SIZE: 128
-  K: 100                          # max number of output objects
-  OFFICIAL_EVAL: true             # use official evaluation script
+  BATCH_SIZE: 256
+  OFFICIAL_EVAL: true

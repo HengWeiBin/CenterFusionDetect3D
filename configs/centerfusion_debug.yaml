@@ -6,11 +6,10 @@ CUDNN:
 GPUS:                             # -1 for CPU
 - 0
 WORKERS: 0
-DEBUG: 1                          # 0: no debug, 1: show debug images, 2: save debug images
+DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save debug images
 EVAL: true                        # only evaluate the val split and quit
 RANDOM_SEED: 0
 MIXED_PRECISION: false
-CONF_THRESH: 0.3                  # confidence threshold
 
 DATASET:
   DATASET: 'nuscenes'             # currently support nuscenes only
@@ -39,6 +38,7 @@ MODEL:
   FUSION_STRATEGY: 'middle' # TODO
   INPUT_SIZE: (448, 800)
   FRUSTUM: true                   # Enable frustum association
+  K: 100                          # max number of output objects
   GENERIC_NET:
     BACKBONE: "dla34"
     NECK: "dlaup"
@@ -46,7 +46,6 @@ MODEL:
     NODE: "DeformConv"            # [DeformConv | GlobalConv | Conv]
 
 LOSS:
-  REG_LOSS: 'l1'                  # regression loss: sl1 | l1 | l2
   NUSCENES_ATT: true
   VELOCITY: true
   WEIGHTS:
@@ -60,7 +59,7 @@ LOSS:
     VELOCITY: 1                   # velocity
 
 TRAIN:
-  BATCH_SIZE: 12
+  BATCH_SIZE: 1
   SHUFFLE: true                   # shuffle training dataloader
   EPOCHS: 60
   RESUME: false
@@ -72,6 +71,5 @@ TRAIN:
   SCALE_FACTOR: 16
 
 TEST:
-  BATCH_SIZE: 24
-  K: 100                          # max number of output objects
+  BATCH_SIZE: 1
   OFFICIAL_EVAL: true             # use official evaluation script

@@ -10,7 +10,14 @@ from collections import defaultdict
 import pycocotools.coco as coco
 import torch
 from timeit import default_timer as timer
-from torchvision.transforms import ColorJitter, Normalize, Lambda, Compose, RandomOrder, ToTensor
+from torchvision.transforms import (
+    ColorJitter,
+    Normalize,
+    Lambda,
+    Compose,
+    RandomOrder,
+    ToTensor,
+)
 
 from utils.image import (
     getAffineTransform,
@@ -62,9 +69,7 @@ class GenericDataset(torch.utils.data.Dataset):
     pc_std = np.ones((18, 1))
     imgDebugIndex = 0
 
-    def __init__(
-        self, config=None, split=None, ann_path=None, img_dir=None, device=None
-    ):
+    def __init__(self, config=None, split=None, ann_path=None, img_dir=None):
         super(GenericDataset, self).__init__()
         if config is not None and split is not None:
             self.split = split
@@ -77,8 +82,6 @@ class GenericDataset(torch.utils.data.Dataset):
             self.coco = coco.COCO(ann_path)
             self.images = self.coco.getImgIds()
             self.img_dir = img_dir
-
-        self.device = device if device is not None else torch.device("cpu")
 
         # initiaize the color augmentation
         self.mean = np.array([0.40789654, 0.44719302, 0.47026115], dtype=np.float32)
@@ -402,8 +405,8 @@ class GenericDataset(torch.utils.data.Dataset):
         else:
             result = (result - self.mean) / self.std
             result = result.transpose(2, 0, 1)
-            result = torch.from_numpy(result)  # .to(self.device) # TODO
-        
+            result = torch.from_numpy(result)
+
         return result
 
     def initReturn(self, item, target):
