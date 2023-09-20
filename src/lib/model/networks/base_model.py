@@ -8,13 +8,17 @@ from torch import nn
 from utils import pointcloud as pc
 from model.utils import initConv2dWeights
 
+
 class BaseModel(nn.Module):
     def __init__(self, num_stacks, last_channel, config):
         super(BaseModel, self).__init__()
         self.config = config
         self.num_stacks = num_stacks
         self.heads = config.heads
-        self.secondary_heads = ["velocity", "nuscenes_att", "depth2", "rotation2"]
+        if config.DATASET.NUSCENES.RADAR_PC:
+            self.secondary_heads = ["velocity", "nuscenes_att", "depth2", "rotation2"]
+        else:
+            self.secondary_heads = []
 
         last_channels = {head: last_channel for head in config.heads}
         for head in self.secondary_heads:

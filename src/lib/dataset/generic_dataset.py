@@ -10,7 +10,7 @@ from collections import defaultdict
 import pycocotools.coco as coco
 import torch
 from timeit import default_timer as timer
-from torchvision.transforms import ColorJitter, Normalize, Lambda, Compose, RandomOrder
+from torchvision.transforms import ColorJitter, Normalize, Lambda, Compose, RandomOrder, ToTensor
 
 from utils.image import (
     getAffineTransform,
@@ -81,10 +81,11 @@ class GenericDataset(torch.utils.data.Dataset):
         self.device = device if device is not None else torch.device("cpu")
 
         # initiaize the color augmentation
-        mean = np.array([0.40789654, 0.44719302, 0.47026115], dtype=np.float32)
-        std = np.array([0.28863828, 0.27408164, 0.27809835], dtype=np.float32)
+        self.mean = np.array([0.40789654, 0.44719302, 0.47026115], dtype=np.float32)
+        self.std = np.array([0.28863828, 0.27408164, 0.27809835], dtype=np.float32)
         self.colorAugmentor = Compose(
             [
+                ToTensor(),
                 RandomOrder(
                     [
                         ColorJitter(brightness=0.4),
@@ -93,7 +94,7 @@ class GenericDataset(torch.utils.data.Dataset):
                     ]
                 ),
                 Lambda(lightingAug),
-                Normalize(mean, std),
+                Normalize(self.mean, self.std),
             ]
         )
 
@@ -396,10 +397,13 @@ class GenericDataset(torch.utils.data.Dataset):
             flags=cv2.INTER_LINEAR,
         )
         result = result.astype(np.float32) / 255.0
-        result = result.transpose(2, 0, 1)
-        result = torch.from_numpy(result)  # .to(self.device) # TODO
         if "train" in self.split and self.config.DATASET.COLOR_AUG:
             result = self.colorAugmentor(result)
+        else:
+            result = (result - self.mean) / self.std
+            result = result.transpose(2, 0, 1)
+            result = torch.from_numpy(result)  # .to(self.device) # TODO
+        
         return result
 
     def initReturn(self, item, target):

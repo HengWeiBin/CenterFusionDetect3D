@@ -284,7 +284,7 @@ class Trainer(object):
                     f"train/{loss}": avgLossStats[loss].avg for loss in avgLossStats
                 }
                 wandb.log(wandbLog, step=(step + 1) + (epoch - 1) * len(dataloader))
-            
+
         # Log epoch results
         wandbLog = {}
         for loss in avgLossStats:
@@ -301,10 +301,12 @@ class Trainer(object):
             WandbLogger.addGroundTruth(
                 dataloader.dataset,
                 img_id,
-                batch["pc_hm"][-1][0],
+                batch["pc_hm"][-1][0] if "pc_hm" in batch else None,
                 config=self.config,
             )
-            WandbLogger.addPredict(result, output["pc_hm"][-1][0], calib[-1])
+            WandbLogger.addPredict(
+                result, output["pc_hm"][-1][0] if "pc_hm" in batch else None, calib[-1]
+            )
             WandbLogger.log.update(wandbLog)
             WandbLogger.syncVisualizeResult()
 

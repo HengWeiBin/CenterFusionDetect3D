@@ -79,7 +79,8 @@ class WandbLogger:
         )
 
         # Render ground truth
-        WandbLogger.drawPcHeatmap(pc_hm.cpu().numpy(), isTarget=True)
+        if pc_hm is not None:
+            WandbLogger.drawPcHeatmap(pc_hm.cpu().numpy(), isTarget=True)
         WandbLogger.drawBox3D(
             {"predictBoxes": anns, "calib": imageInfo["calib"]}, isTarget=True
         )
@@ -101,9 +102,8 @@ class WandbLogger:
             return
 
         WandbLogger.renderNuscBev(predictBoxes)
-        WandbLogger.drawPcHeatmap(
-            pc_hm.cpu().numpy(), isTarget=False
-        )
+        if pc_hm is not None:
+            WandbLogger.drawPcHeatmap(pc_hm.cpu().numpy(), isTarget=False)
         WandbLogger.drawBox3D(
             {"predictBoxes": predictBoxes, "calib": calib}, isTarget=False
         )

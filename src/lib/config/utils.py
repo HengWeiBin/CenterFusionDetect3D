@@ -49,13 +49,16 @@ def updateConfigHeads(config):
     if config.LOSS.NUSCENES_ATT:
         heads.update({"nuscenes_att": 8})
 
+    # velocity head
+    if config.LOSS.VELOCITY:
+        heads.update({"velocity": 3})
+
     # Point cloud heads
     if config.DATASET.NUSCENES.RADAR_PC:
         heads.update(
             {
                 "depth2": 1,
                 "rotation2": 8,
-                "velocity": 3,
             }
         )
 
@@ -106,14 +109,17 @@ def updateConvNumOfHeads(config):
         None
     """
     head_conv = {head: [256] for head in config.heads}
-    head_conv.update(
-        {
-            "depth2": [256, 256, 256],
-            "rotation2": [256, 256, 256],
-            "velocity": [256, 256, 256],
-            "nuscenes_att": [256, 256, 256],
-        }
-    )
+
+    if config.DATASET.NUSCENES.RADAR_PC:
+        head_conv.update(
+            {
+                "depth2": [256, 256, 256],
+                "rotation2": [256, 256, 256],
+                "velocity": [256, 256, 256],
+                "nuscenes_att": [256, 256, 256],
+            }
+        )
+        
     config.head_conv = CN()
     for k, v in head_conv.items():
         exec(f"config.head_conv.{k} = {v}")
