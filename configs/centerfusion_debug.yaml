@@ -10,6 +10,7 @@ DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save d
 EVAL: true                        # only evaluate the val split and quit
 RANDOM_SEED: 0
 MIXED_PRECISION: false
+CONF_THRESH: 0.3                  # confidence threshold for visualization
 
 DATASET:
   DATASET: 'nuscenes'             # currently support nuscenes only

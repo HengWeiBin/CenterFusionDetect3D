@@ -29,6 +29,7 @@ class WandbLogger:
     predBox3DOverlay = None
     bev = None
     sampleToken = None
+    conf_thresh = None
     log = {}
 
     @staticmethod
@@ -45,6 +46,7 @@ class WandbLogger:
         WandbLogger.predBox3DOverlay = None
         WandbLogger.bev = None
         WandbLogger.sampleToken = None
+        WandbLogger.conf_thresh = None
         WandbLogger.log = {}
 
     @staticmethod
@@ -79,6 +81,7 @@ class WandbLogger:
         )
 
         # Render ground truth
+        WandbLogger.conf_thresh = config.CONF_THRESH
         if pc_hm is not None:
             WandbLogger.drawPcHeatmap(pc_hm.cpu().numpy(), isTarget=True)
         WandbLogger.drawBox3D(
@@ -149,6 +152,8 @@ class WandbLogger:
 
         # draw 3D bounding box only for first image in batch
         for predictBox in predictBoxes:
+            if "score" in predictBox and predictBox["score"] < WandbLogger.conf_thresh:
+                continue
             bbox3D = get3dBox(
                 predictBox["dimension"],
                 predictBox["location"],

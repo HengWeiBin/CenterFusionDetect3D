@@ -284,7 +284,7 @@ class Trainer(object):
                     f"train/{loss}": avgLossStats[loss].avg for loss in avgLossStats
                 }
                 wandb.log(wandbLog, step=(step + 1) + (epoch - 1) * len(dataloader))
-
+            
         # Log epoch results
         wandbLog = {}
         for loss in avgLossStats:
