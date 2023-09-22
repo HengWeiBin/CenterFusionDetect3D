@@ -86,6 +86,9 @@ def plotResults(log, output_dir):
     Returns:
         None
     """
+    if "train" not in log and "val" not in log:
+        return
+    
     heads = [
         "total",
         # 2D head-weights

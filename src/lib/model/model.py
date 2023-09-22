@@ -22,7 +22,7 @@ def getModel(config):
     """
     arch = config.MODEL.ARCH
     if "_" in arch:
-        num_layers = int(arch[arch.find("_") + 1 :])
+        num_layers = arch[arch.find("_") + 1 :]
         arch = arch[: arch.find("_")]
     else:
         num_layers = 0
@@ -48,7 +48,9 @@ def loadModel(model, config, optimizer=None):
     checkpoint = torch.load(
         config.MODEL.LOAD_DIR, map_location=lambda storage, _: storage
     )
-    start_epoch = checkpoint["epoch"] if "epoch" in checkpoint else 0
+    start_epoch = 0
+    if "epoch" in checkpoint and config.TRAIN.RESUME:
+        start_epoch = checkpoint["epoch"]
     print("loaded {}, epoch {}".format(config.MODEL.LOAD_DIR, start_epoch))
 
     # convert data_parallal model to normal model

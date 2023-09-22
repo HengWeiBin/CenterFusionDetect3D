@@ -216,8 +216,8 @@ class WandbLogger:
                 continue
             images[i] = cv2.cvtColor(images[i], cv2.COLOR_BGR2RGB)
             wandbImages.append(wandb.Image(images[i], caption=f"{titles[i]}"))
-        WandbLogger.log.update({"val/boxes": wandbImages[:4]})
-        WandbLogger.log.update({"val/bev": wandbImages[4]})
+        WandbLogger.log.update({"val/boxes": wandbImages[:-1]})
+        WandbLogger.log.update({"val/bev": wandbImages[-1]})
         wandb.log(WandbLogger.log)
         print(f"Visualized {WandbLogger.sampleToken}")
 

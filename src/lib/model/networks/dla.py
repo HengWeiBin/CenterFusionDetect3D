@@ -522,7 +522,7 @@ DLA_NODE = {
 
 class DLASeg(BaseModel):
     def __init__(self, num_layers, config):
-        super(DLASeg, self).__init__(1, 64 if num_layers == 34 else 128, config=config)
+        super(DLASeg, self).__init__(1, 64 if num_layers == "34" else 128, config=config)
         down_ratio = 4
         self.config = config
         self.node_type = DLA_NODE[config.MODEL.DLA.NODE]

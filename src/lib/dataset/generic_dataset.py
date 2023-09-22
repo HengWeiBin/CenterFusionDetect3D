@@ -6,7 +6,6 @@ import numpy as np
 import math
 import cv2
 import os
-from collections import defaultdict
 import pycocotools.coco as coco
 import torch
 from timeit import default_timer as timer
