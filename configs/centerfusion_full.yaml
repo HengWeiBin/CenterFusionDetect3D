@@ -1,4 +1,4 @@
-NAME: CenterFusionBaseline
+NAME: CenterFusionFull
 CUDNN:
   BENCHMARK: true
   DETERMINISTIC: false
