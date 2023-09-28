@@ -137,25 +137,29 @@ def main():
             if config.TEST.OFFICIAL_EVAL:
                 val_loader.dataset.run_eval(preds, output_dir)
 
-                # log validation result
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"nuscenes_eval_det_output_{config.DATASET.VAL_SPLIT}",
-                        "metrics_summary.json",
-                    ),
-                    "r",
-                ) as f:
-                    metrics = json.load(f)
-                logger.info(f'AP/overall: {metrics["mean_ap"]*100.0}%')
+                try:
+                    # log validation result
+                    with open(
+                        os.path.join(
+                            output_dir,
+                            f"nuscenes_eval_det_output_{config.DATASET.VAL_SPLIT}",
+                            "metrics_summary.json",
+                        ),
+                        "r",
+                    ) as f:
+                        metrics = json.load(f)
+                    logger.info(f'AP/overall: {metrics["mean_ap"]*100.0}%')
 
-                for k, v in metrics["mean_dist_aps"].items():
-                    print(f"AP/{k}: {v * 100.0}%")
+                    for k, v in metrics["mean_dist_aps"].items():
+                        print(f"AP/{k}: {v * 100.0}%")
 
-                for k, v in metrics["tp_errors"].items():
-                    print(f"Scores/{k}: {v}")
+                    for k, v in metrics["tp_errors"].items():
+                        print(f"Scores/{k}: {v}")
 
-                logger.info(f'Scores/NDS: {metrics["nd_score"]}')
+                    logger.info(f'Scores/NDS: {metrics["nd_score"]}')
+
+                except Exception as e:
+                    logger.error(e)
 
         # adjust learning rate
         if epoch in config.TRAIN.LR_STEP:

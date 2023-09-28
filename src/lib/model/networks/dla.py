@@ -273,7 +273,7 @@ class DLA(nn.Module):
         return y
 
     def load_pretrained_model(self, data="imagenet", name="dla34", hash="ba72cf86"):
-        if name.endswith(".pth"):
+        if name.endswith(".pth") or name.endswith("pt"):
             model_weights = torch.load(data + name)
         else:
             model_url = get_model_url(data, name, hash)
