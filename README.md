@@ -138,6 +138,8 @@ The pre-trained CenterFusion model and the baseline CenterNet model can be downl
   |-------------|---------|-------|-----|-----|------|--------|-----------|
   | [centerfusion_e60](https://drive.google.com/uc?export=download&id=1XaYx7JJJmQ6TBjCJJster-Z7ERyqu4Ig) | 60 |  2x Nvidia Quadro P5000 | DLA | 0.453 | 0.332 | 0.449 | 0.326 |
   | [centernet_baseline_e170](https://drive.google.com/uc?export=download&id=1iFF7a5oueFfB5GnUoHFDnntFdTst-bVI) | 170 |  2x Nvidia Quadro P5000 | DLA | 0.328 | 0.306 | - | - |
+  | [centerfusion_e230](https://github.com/HengWeiBin/CenterFusionDetect3D/releases/download/v1.0.0/centerfusion_e230.pt) | 230 | 4x Nvidia RTX A6000 | DLA | 0.445 | 0.312 | - | - |
+  | [centernet_baseline_e170](https://github.com/HengWeiBin/CenterFusionDetect3D/releases/download/v1.0.0/centernet_baseline_e170.pt) | 170 | 4x Nvidia RTX A6000 | DLA | 0.321 | 0.296 | - | - |
   **Notes:**
   - The *centernet_baseline_e170* model is obtained by starting from the original CenterNet 3D detection model ([nuScenes_3Ddetection_e140](https://github.com/xingyizhou/CenterTrack/blob/master/readme/MODEL_ZOO.md)) and training the velocity and attributes heads for 30 epochs. 
 
