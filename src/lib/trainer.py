@@ -305,7 +305,7 @@ class Trainer(object):
                 config=self.config,
             )
             WandbLogger.addPredict(
-                result, output["pc_hm"][-1][0] if "pc_hm" in batch else None, calib[-1]
+                result, output["pc_hm"][-1][0] if "pc_hm" in output else None, calib[-1]
             )
             WandbLogger.log.update(wandbLog)
             WandbLogger.syncVisualizeResult()
