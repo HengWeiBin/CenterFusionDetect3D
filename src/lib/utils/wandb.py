@@ -101,7 +101,7 @@ class WandbLogger:
         Returns:
             None
         """
-        if WandbLogger.predPcHmOverlay is not None:
+        if WandbLogger.bev is not None:
             return
 
         WandbLogger.renderNuscBev(predictBoxes)

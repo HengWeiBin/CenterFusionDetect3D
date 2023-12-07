@@ -1,5 +1,7 @@
 # CenterFusionDetect3D
- This repository contains the implementation of [CenterFusion: Center-based Radar and Camera Fusion for 3D Object Detection](https://arxiv.org/abs/2011.04841).
+ This repository contains the reimplementation of [CenterFusion](https://github.com/mrnabati/CenterFusion)
+ <br>
+ [CenterFusion: Center-based Radar and Camera Fusion for 3D Object Detection](https://arxiv.org/abs/2011.04841).
 
  ![](figures/pillars.png)
  ### Citing CenterFusion <!-- omit in toc -->
@@ -149,7 +151,7 @@ The `$CF_ROOT/src/train.py` script can be used to train the network:
 
   ```bash
   cd $CF_ROOT
-  python src/train.py
+  python src/main.py --cfg configs/centerfusion_full.yaml
   ```
 
 The `TRAIN_SPLIT` parameter determines the training set, which could be `mini_train` or `train`. the `LOAD_DIR` parameter can be set to continue training from a pretrained model, or removed to start training from scratch. You can modify the parameters in the script as needed, or add more supported parameters from `$CF_ROOT/src/lib/config/default.py`.
