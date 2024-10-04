@@ -1,1 +1,1 @@
-from .dataset_factory import getDataset as getDataset
+from .dataset_factory import getDataset

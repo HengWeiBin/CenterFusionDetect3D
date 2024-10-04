@@ -39,6 +39,7 @@ def map_pointcloud_to_image(pc, cam_intrinsic, img_shape=(1600,900)):
     mask = np.logical_and(mask, points[1, :] < height - 1)
     points = points[:, mask]
     depths = depths[mask]
+    points[2, :] = depths
 
     return points, depths, mask
 

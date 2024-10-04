@@ -2,25 +2,18 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import _init_paths  # initialize paths
+import _init_paths  # add lib to PYTHONPATH
 import argparse
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import random
-import json
-import os
 
-from utils import createLogger, saveModel, plotResults
+from utils import createLogger, plotResults
 from config import config, updateConfig, updateDatasetAndModelConfig
 from dataset import getDataset
 from model import getModel, loadModel
 from trainer import Trainer
-
-try:
-    import wandb
-except ImportError:
-    wandb = None
 
 
 def parse_args():
@@ -42,148 +35,97 @@ def parse_args():
     updateConfig(config, args)
 
 
-def getOptimizer(config, model):
-    if config.TRAIN.OPTIMIZER == "adam":
-        optimizer = torch.optim.Adam(model.parameters(), config.TRAIN.LR)
-    elif config.TRAIN.OPTIMIZER == "sgd":
-        optimizer = torch.optim.SGD(
-            model.parameters(), config.TRAIN.LR, momentum=0.9, weight_decay=0.0001
-        )
-    else:
-        assert 0, config.TRAIN.OPTIMIZER
-    return optimizer
-
-
 def main():
     logger, output_dir = createLogger(config)
 
-    np.random.seed(config.RANDOM_SEED)
-    torch.manual_seed(config.RANDOM_SEED)
-    random.seed(config.RANDOM_SEED)
-
     # cudnn related setting
     cudnn.benchmark = config.CUDNN.BENCHMARK
-    cudnn.deterministic = config.CUDNN.DETERMINISTIC
     cudnn.enabled = config.CUDNN.ENABLED
-    if torch.cuda.device_count() < len(config.GPUS):
+    if config.GPUS[0] != -1 and torch.cuda.device_count() < len(config.GPUS):
         errorMsg = f"Not enough available gpu! {torch.cuda.device_count()} < {len(config.GPUS)}"
         logger.critical(errorMsg)
         raise RuntimeError(errorMsg)
-    if len(config.GPUS):
-        torch.multiprocessing.set_start_method("spawn")
+
+    # Reduce some precision to speed up training if GPU is Ampere
+    if torch.cuda.get_device_capability()[0] >= 8:
+        torch.set_float32_matmul_precision("high")
 
     dataset = getDataset(config.DATASET.DATASET)
     updateDatasetAndModelConfig(config, dataset, output_dir)
     logger.info(config)
 
     model = getModel(config)
-    optimizer = getOptimizer(config, model)
-    start_epoch = 0
+    start_epoch = 1
     log = {}
-    lr = config.TRAIN.LR
     if config.MODEL.LOAD_DIR != "":
-        log, model, optimizer, start_epoch = loadModel(model, config, optimizer)
-    trainer = Trainer(config, model, optimizer)
-    trainer.setDevice(config)
+        log, model, start_epoch = loadModel(model, config)
     log.update({"memory": []})
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Number of parameters: {total_params}")
+    val_dataset = dataset(config, config.DATASET.VAL_SPLIT)
+    trainer = Trainer(config, model, logger, log, output_dir, val_dataset, start_epoch)
+
+    # Calculate number of parameters
+    total_params = {"frozen": 0, "trainable": 0}
+    name_params = {"head": 0, "backbone": 0, "neck": 0, "combiner": 0}
+    for name, param in model.named_parameters():
+        name = name.lower()
+        # Count number of parameters in each part of the model
+        # if "head" in name or "combiner" in name:
+        if any([part in name for part in ["head", "combiner", "base"]]):
+            if "head" in name:
+                name_params["head"] += param.numel()
+            if "combiner" in name:
+                name_params["combiner"] += param.numel()
+            if "base" in name:
+                name_params["backbone"] += param.numel()
+        else:
+            name_params["neck"] += param.numel()
+
+        # Count number of trainable and frozen parameters
+        if param.requires_grad:
+            total_params["trainable"] += param.numel()
+        else:
+            total_params["frozen"] += param.numel()
+
+    logger.info(model)
+    logger.info("Number of parameters:")
+    logger.info(f"{' '*4}{'Backbone:':<10}{name_params['backbone'] * 1e-6:>5.2f}M")
+    logger.info(f"{' '*4}{'Neck:':<10}{name_params['neck'] * 1e-6:>5.2f}M")
+    logger.info(f"{' '*4}{'Head:':<10}{name_params['head'] * 1e-6:>5.2f}M")
+    logger.info(f"{' '*4}{'Combiner:':<10}{name_params['combiner'] * 1e-6:>5.2f}M")
+    logger.info(f"{' '*4}{'Total:':<10}{sum(total_params.values()) * 1e-6:>5.2f}M")
+    logger.info(f"{' '*4}{'Trainable:':<10}{total_params['trainable'] * 1e-6:>5.2f}M")
 
     val_loader = torch.utils.data.DataLoader(
-        dataset(config, config.DATASET.VAL_SPLIT),
-        batch_size=config.TEST.BATCH_SIZE,
-        shuffle=True,
-        num_workers=config.WORKERS,
+        val_dataset,
+        batch_size=config.TEST.BATCH_SIZE // max(len(config.GPUS), 1),
+        shuffle=False,
+        num_workers=config.WORKERS if config.EVAL else config.WORKERS // 2,
+        pin_memory=True,
     )
 
     if config.EVAL:
         # Run evaluation only
-        with torch.no_grad():
-            preds = trainer.val(1, val_loader, logger, log)
-        val_loader.dataset.run_eval(preds, output_dir)
+        if "test" in config.DATASET.VAL_SPLIT:
+            trainer.test(val_loader)
+            return
+
+        trainer.val(val_loader)
         return
 
     train_loader = torch.utils.data.DataLoader(
         dataset(config, config.DATASET.TRAIN_SPLIT),
-        batch_size=config.TRAIN.BATCH_SIZE,
+        batch_size=config.TRAIN.BATCH_SIZE // max(len(config.GPUS), 1),
         shuffle=config.TRAIN.SHUFFLE,
         num_workers=config.WORKERS,
         drop_last=True,
+        pin_memory=True,
     )
 
-    for epoch in range(start_epoch + 1, config.TRAIN.EPOCHS + 1):
-        # train
-        trainer.train(epoch, train_loader, logger, log)
-
-        # save model
-        if config.TRAIN.SAVE_INTERVALS > 0 and epoch % config.TRAIN.SAVE_INTERVALS == 0:
-            saveModel(
-                log,
-                model,
-                epoch,
-                os.path.join(output_dir, f"model_{epoch}.pt"),
-                optimizer,
-            )
-        saveModel(
-            log, model, epoch, os.path.join(output_dir, "model_last.pt"), optimizer
-        )
-
-        # validation
-        if config.TRAIN.VAL_INTERVALS > 0 and epoch % config.TRAIN.VAL_INTERVALS == 0:
-            with torch.no_grad():
-                preds = trainer.val(epoch, val_loader, logger, log)
-
-            # evaluate using dataset-official scripts
-            if config.TEST.OFFICIAL_EVAL:
-                val_loader.dataset.run_eval(preds, output_dir)
-
-                try:
-                    # log validation result
-                    with open(
-                        os.path.join(
-                            output_dir,
-                            f"nuscenes_eval_det_output_{config.DATASET.VAL_SPLIT}",
-                            "metrics_summary.json",
-                        ),
-                        "r",
-                    ) as f:
-                        metrics = json.load(f)
-                    logger.info(f'AP/overall: {metrics["mean_ap"]*100.0}%')
-
-                    for k, v in metrics["mean_dist_aps"].items():
-                        print(f"AP/{k}: {v * 100.0}%")
-
-                    for k, v in metrics["tp_errors"].items():
-                        print(f"Scores/{k}: {v}")
-
-                    logger.info(f'Scores/NDS: {metrics["nd_score"]}')
-
-                except Exception as e:
-                    logger.error(e)
-
-        # adjust learning rate
-        if epoch in config.TRAIN.LR_STEP:
-            lr = config.TRAIN.LR * (0.1 ** (config.TRAIN.LR_STEP.index(epoch) + 1))
-            logger.info(f"Changing learning rate to {lr}")
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = lr
+    trainer.train(train_loader, val_loader)
     plotResults(log, output_dir)
     logger.info("Done")
 
 
 if __name__ == "__main__":
     parse_args()
-    if wandb is not None:
-        wandb.init(
-            config=config,
-            resume="allow",
-            project="CenterFusionDetect3D",
-            name=config.NAME,
-            job_type="train" if not config.EVAL else "eval",
-        )
-    else:
-        print("wandb is not installed, wandb logging is disabled")
-
     main()
-    if wandb is not None:
-        wandb.finish()

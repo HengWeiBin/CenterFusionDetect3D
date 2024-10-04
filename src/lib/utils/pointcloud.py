@@ -4,12 +4,10 @@ from __future__ import print_function
 
 from nuscenes.utils.data_classes import RadarPointCloud
 from nuscenes.utils.geometry_utils import view_points, transform_matrix
-from nuscenes.utils.data_classes import RadarPointCloud
 from functools import reduce
 from typing import Tuple, Dict
 import os.path as osp
 import torch
-import timeit
 import numpy as np
 from pyquaternion import Quaternion
 
@@ -194,14 +192,21 @@ class RadarPointCloudWithVelocity(RadarPointCloud):
         return all_pc, all_times
 
 
-def get_alpha(rot):
-    # output: (B, 8) [bin1_cls[0], bin1_cls[1], bin1_sin, bin1_cos,
-    #                 bin2_cls[0], bin2_cls[1], bin2_sin, bin2_cos]
-    # return rot[:, 0]
-    idx = rot[:, 1] > rot[:, 5]
-    alpha1 = torch.atan2(rot[:, 2], rot[:, 3]) + (-0.5 * 3.14159)
-    alpha2 = torch.atan2(rot[:, 6], rot[:, 7]) + (0.5 * 3.14159)
-    # return alpha1 * idx + alpha2 * (~idx)
+def get_alpha(rotation):
+    """
+    Convert rotation to observation angle
+
+    Args:
+        rotation: rotation tensor (B, K, 8)
+            [bin1_cls[0], bin1_cls[1], bin1_sin, bin1_cos,
+            bin2_cls[0], bin2_cls[1], bin2_sin, bin2_cos]
+
+    Returns:
+        alpha: observation angle (B, K)
+    """
+    idx = rotation[..., 1] > rotation[..., 5]
+    alpha1 = torch.atan2(rotation[..., 2], rotation[..., 3]) + (-0.5 * torch.pi)
+    alpha2 = torch.atan2(rotation[..., 6], rotation[..., 7]) + (0.5 * torch.pi)
     alpha = alpha1 * idx.float() + alpha2 * (~idx).float()
     return alpha
 
@@ -211,10 +216,10 @@ def cvtAlphaToYaw(alpha, objCenterX, imgCenterX, focalLength):
     Get rotation yaw by alpha + theta - 180
 
     Args:
-        alpha : Observation angle of object, ranging [-pi..pi]
-        objCenterX : Object center x to the camera center (x-W/2), in pixels
-        imgCenterX: image center x, in pixels
-        focalLength: Camera focal length x, in pixels
+        alpha : Observation angle of object, ranging [-pi..pi] (B, K)
+        objCenterX : Object center x to the camera center (x-W/2), in pixels (B, K)
+        imgCenterX: image center x, in pixels (B, K)
+        focalLength: Camera focal length x, in pixels (K, B)
 
     Return:
         yaw : Rotation around Y-axis in camera coordinates [-pi..pi]
@@ -225,39 +230,69 @@ def cvtAlphaToYaw(alpha, objCenterX, imgCenterX, focalLength):
         yaw = alpha + torch.atan2(objCenterX - imgCenterX, focalLength)
     else:
         yaw = alpha + np.arctan2(objCenterX - imgCenterX, focalLength)
-    
-    if yaw > 3.14159:
-        yaw -= 2 * 3.14159
-    if yaw < -3.14159:
-        yaw += 2 * 3.14159
+
+    yaw[yaw > torch.pi] -= 2 * torch.pi
+    yaw[yaw < -torch.pi] += 2 * torch.pi
     return yaw
 
 
-def get3DCorners(dim, rotation_y):
+def get3DCorners(dim, yaw):
     """
     Get 3D bounding box corners from its parameterization.
 
     Args:
-        dim: 3D object dimensions [l, w, h]
-        rotation_y: Rotation ry around Y-axis in camera coordinates [-pi..pi]
+        dim: 3D object dimensions [h, w, l] (B, K, 3)
+        yaw: Rotation ry around Y-axis in camera coordinates [-pi..pi] (B, K)
 
     Return:
-        corners_3d: 3D bounding box corners [8, 3]
+        corners_3d: 3D bounding box corners (B, K, 8, 3)
     """
-    if isinstance(rotation_y, torch.Tensor):
-        lib, matmul, toArray = torch, torch.mm, torch.tensor
+    if isinstance(yaw, torch.Tensor):
+        lib, unsqueeze, full, zeros, transpose = (
+            torch,
+            torch.unsqueeze,
+            lambda *args, **kwargs: torch.full(*args, **kwargs, device=yaw.device),
+            lambda *args, **kwargs: torch.zeros(*args, **kwargs, device=yaw.device),
+            torch.permute,
+        )
     else:
-        lib, matmul, toArray = np, np.dot, np.array
+        lib, unsqueeze, full, zeros, transpose = (
+            np,
+            np.expand_dims,
+            np.full,
+            np.zeros,
+            np.transpose,
+        )
 
-    c, s = lib.cos(rotation_y), lib.sin(rotation_y)
-    R = toArray([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=lib.float32)
-    l, w, h = dim[2], dim[1], dim[0]
-    x_corners = [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2]
-    y_corners = [0, 0, 0, 0, -h, -h, -h, -h]
-    z_corners = [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2]
+    batch, K = dim.shape[:2]
+    c, s = lib.cos(yaw), lib.sin(yaw)  # (B, K)
+    R = zeros((batch, K, 3, 3), dtype=lib.float32)  # (B, K, 3, 3)
+    R[:, :, 0, 0] = c
+    R[:, :, 0, 2] = s
+    R[:, :, 1, 1] = 1
+    R[:, :, 2, 0] = -s
+    R[:, :, 2, 2] = c
 
-    corners = toArray([x_corners, y_corners, z_corners], dtype=lib.float32)
-    corners_3d = matmul(R, corners).transpose(1, 0)
+    l, w, h = dim[:, :, 2], dim[:, :, 1], dim[:, :, 0]  # (B, K)
+    x_corners = full((batch, K, 8), 0.5, dtype=lib.float32)  # (B, K, 8)
+    x_corners[:, :, 2:4] *= -1
+    x_corners[:, :, 6:8] *= -1
+    x_corners *= unsqueeze(l, 2)  # (B, K, 8)
+
+    y_corners = zeros((batch, K, 8), dtype=lib.float32)  # (B, K, 8)
+    y_corners[:, :, 4:] = unsqueeze(h, 2) * -1
+
+    z_corners = full((batch, K, 8), 0.5, dtype=lib.float32)  # (B, K, 8)
+    z_corners[:, :, 1:3] *= -1
+    z_corners[:, :, 5:7] *= -1
+    z_corners *= unsqueeze(w, 2)  # (B, K, 8)
+
+    corners = lib.stack([x_corners, y_corners, z_corners], -2)  # (B, K, 3, 8)
+
+    corners_3d = lib.einsum(
+        "lkij, lkjm->lkim", R, corners
+    )  # (B, K, 3, 3) @ (B, K, 3, 8) = (B, K, 3, 8)
+    corners_3d = transpose(corners_3d, (0, 1, 3, 2))  # (B, K, 8, 3)
     return corners_3d
 
 
@@ -266,17 +301,30 @@ def getDistanceThresh(calib, center, dim, alpha):
     Get the distance threshold for the object.
 
     Args:
-        calib: The calibration matrix.
-        center: The center of the object.
-        dim: The dimensions of the object.
-        alpha: The rotation angle of the object.
+        calib: The calibration matrix. (B, 3, 4)
+        center: The center of the object. (B, K, 2)
+        dim: The dimensions of the object. (B, K, 3)
+        alpha(float): The rotation angle of the object. (B, K, 1)
 
     Returns:
-        The distance threshold for the object.
+        The distance threshold for the object. (B, K)
     """
-    yaw = cvtAlphaToYaw(alpha, center[0], calib[0, 2], calib[0, 0])
+    batch_size, K, _ = center.shape
+    # calib (B, 3, 4) -> (B, K, 3, 4)
+    if isinstance(calib, torch.Tensor):
+        calib = calib.view(-1, 1, 3, 4).expand(batch_size, K, 3, 4)
+        lib_min = lambda x, dim: x.min(dim=dim).values
+        lib_max = lambda x, dim: x.max(dim=dim).values
+    else:
+        calib = np.broadcast_to(calib, (batch_size, K, 3, 4))
+        lib_min = lambda x, dim: x.min(axis=dim)
+        lib_max = lambda x, dim: x.max(axis=dim)
+
+    yaw = cvtAlphaToYaw(alpha, center[..., 0], calib[..., 0, 2], calib[..., 0, 0])
     corners_3d = get3DCorners(dim, yaw)
-    dist_thresh = max(corners_3d[:, 2]) - min(corners_3d[:, 2]) / 2.0
+    dist_thresh = (
+        lib_max(corners_3d[..., 2], -1) - lib_min(corners_3d[..., 2], -1) / 2.0
+    )
     return dist_thresh
 
 
@@ -302,21 +350,12 @@ def getPcFrustumHeatmap(output, pc_dep, calib, config):
     calib = calib.view(batch, 3, 4)
 
     ## get estimated depths
-    out_dep = 1.0 / (output["depth"].sigmoid() + 1e-6) - 1.0
-    dep = transposeAndGetFeature(out_dep, indices)  # B x K x (C)
-    if dep.size(2) == nClass:
-        classes_ = classes.view(batch, K, 1, 1)
-        dep = dep.view(batch, K, -1, 1)  # B x K x C x 1
-        dep = dep.gather(2, classes_.long()).squeeze(2)  # B x K x 1
+    depth = transposeAndGetFeature(output["depth"], indices)  # B x K x (C)
 
     # get topk bounding boxes
     widthHeight = transposeAndGetFeature(widthHeight, indices)  # B x K x 2
     widthHeight = widthHeight.view(batch, K, 2)
     widthHeight[widthHeight < 0] = 0
-    if widthHeight.size(2) == 2 * nClass:
-        widthHeight = widthHeight.view(batch, K, -1, 2)
-        classes_ = classes.view(batch, K, 1, 1).expand(batch, K, 1, 2)
-        widthHeight = widthHeight.gather(2, classes_.long()).squeeze(2)  # B x K x 2
     bboxes = torch.cat(
         [
             xs - widthHeight[..., 0:1] / 2,
@@ -328,29 +367,30 @@ def getPcFrustumHeatmap(output, pc_dep, calib, config):
     )  # B x K x 4
 
     # get dimensions and rotation
-    dims = transposeAndGetFeature(output["dimension"], indices).view(batch, K, -1)
-    rot = transposeAndGetFeature(output["rotation"], indices).view(batch, K, -1)
+    dimension = transposeAndGetFeature(output["dimension"], indices).view(batch, K, -1)
+    rotation = transposeAndGetFeature(output["rotation"], indices).view(batch, K, -1)
+    alpha = get_alpha(rotation)  # B x K
+    center = torch.stack(
+        [
+            (bboxes[..., 0] + bboxes[..., 2]) / 2,
+            (bboxes[..., 1] + bboxes[..., 3]) / 2,
+        ],
+        dim=2,
+    )  # B x K x 2
+    distanceThreshold = getDistanceThresh(calib, center, dimension, alpha)  # B x K
 
     # Draw heatmap
-    for i, [pc_dep_b, bboxes_b, depth_b, dim_b, rot_b, calib_b] in enumerate(
-        zip(pc_dep, bboxes, dep, dims, rot, calib)
-    ):
-        alpha_b = get_alpha(rot_b).unsqueeze(1)
-
-        for bbox, depth, dim, alpha in zip(bboxes_b, depth_b, dim_b, alpha_b):
-            center = torch.tensor(
-                [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2],
-                device=pc_dep_b.device,
-            )
-            distanceThreshold = getDistanceThresh(calib_b, center, dim, alpha)
+    for batch in range(len(bboxes)):
+        for i in range(len(bboxes[batch])):
             cvtPcDepthToHeatmap(
-                pc_hm[i],
-                pc_dep_b,
-                depth,
-                bbox,
-                distanceThreshold,
-                config.DATASET.NUSCENES.MAX_PC_DIST,
+                pc_hm[batch],
+                pc_dep[batch],
+                depth[batch, i],
+                bboxes[batch, i],
+                distanceThreshold[batch, i],
+                config.DATASET.MAX_PC_DIST,
             )
+
     return pc_hm
 
 
@@ -377,7 +417,7 @@ def cvtPcDepthToHeatmap(pc_hm, pc_dep, depth, bbox, distanceThreshold, max_pc_di
         )
     else:
         lib, toArray, nonzero = (np, np.array, np.nonzero)
-        
+
     if isinstance(depth, list) and len(depth) > 0:
         depth = depth[0]
 
@@ -395,39 +435,47 @@ def cvtPcDepthToHeatmap(pc_hm, pc_dep, depth, bbox, distanceThreshold, max_pc_di
     )
 
     roi = pc_dep[:, bbox_int[1] : bbox_int[3] + 1, bbox_int[0] : bbox_int[2] + 1]
-    pc_dep, vel_x, vel_z = roi[0], roi[1], roi[2]
+    enableVel = len(roi) == 3
+    if enableVel:
+        pc_dep, vel_x, vel_z = roi[0], roi[1], roi[2]
+    else:
+        pc_dep = roi[0]
 
     nonZeroIndex = nonzero(pc_dep)
     if len(nonZeroIndex[0]) > 0:
         nonZero_pc_dep = pc_dep[nonZeroIndex]
-        nonZero_vel_x = vel_x[nonZeroIndex]
-        nonZero_vel_z = vel_z[nonZeroIndex]
+        if enableVel:
+            nonZero_vel_x = vel_x[nonZeroIndex]
+            nonZero_vel_z = vel_z[nonZeroIndex]
 
         # Get points within distance threshold
         within_thresh = (nonZero_pc_dep < depth + distanceThreshold) & (
             nonZero_pc_dep > max(0, depth - distanceThreshold)
         )
         pc_dep_match = nonZero_pc_dep[within_thresh]
-        vel_x_match = nonZero_vel_x[within_thresh]
-        vel_z_match = nonZero_vel_z[within_thresh]
+        if enableVel:
+            vel_x_match = nonZero_vel_x[within_thresh]
+            vel_z_match = nonZero_vel_z[within_thresh]
 
         if len(pc_dep_match) > 0:
             arg_min = lib.argmin(pc_dep_match)
             dist = pc_dep_match[arg_min]
-            vx = vel_x_match[arg_min]
-            vz = vel_z_match[arg_min]
+            if enableVel:
+                vx = vel_x_match[arg_min]
+                vz = vel_z_match[arg_min]
             dist /= max_pc_dist  # normalize depth
 
             w = bbox[2] - bbox[0]
-            w_interval = 0.3 * w # Heatmap to box ratio is 0.3
+            w_interval = 0.3 * w  # Heatmap to box ratio is 0.3
             w_min = int(center[0] - w_interval / 2.0)
             w_max = int(center[0] + w_interval / 2.0)
 
             h = bbox[3] - bbox[1]
-            h_interval = 0.3 * h # Heatmap to box ratio is 0.3
+            h_interval = 0.3 * h  # Heatmap to box ratio is 0.3
             h_min = int(center[1] - h_interval / 2.0)
             h_max = int(center[1] + h_interval / 2.0)
 
             pc_hm[0, h_min : h_max + 1, w_min : w_max + 1 + 1] = dist
-            pc_hm[1, h_min : h_max + 1, w_min : w_max + 1 + 1] = vx
-            pc_hm[2, h_min : h_max + 1, w_min : w_max + 1 + 1] = vz
+            if enableVel:
+                pc_hm[1, h_min : h_max + 1, w_min : w_max + 1 + 1] = vx
+                pc_hm[2, h_min : h_max + 1, w_min : w_max + 1 + 1] = vz

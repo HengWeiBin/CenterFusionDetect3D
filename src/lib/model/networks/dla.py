@@ -166,6 +166,7 @@ class DLA(nn.Module):
         self,
         levels,
         channels,
+        in_channels=3,
         num_classes=1000,
         block=BasicBlock,
         residual_root=False,
@@ -175,7 +176,7 @@ class DLA(nn.Module):
         self.num_classes = num_classes
         self.base_layer = nn.Sequential(
             nn.Conv2d(
-                3,
+                in_channels,
                 channels[0],
                 kernel_size=7,
                 stride=1,
@@ -216,6 +217,10 @@ class DLA(nn.Module):
             level_root=True,
             root_residual=residual_root,
         )
+        delattr(self.level3, "project")
+        delattr(self.level4, "project")
+        self.level3.project = None
+        self.level4.project = None
         self.level5 = Tree(
             levels[5],
             block,
@@ -278,16 +283,15 @@ class DLA(nn.Module):
         else:
             model_url = get_model_url(data, name, hash)
             model_weights = model_zoo.load_url(model_url)
-        num_classes = len(model_weights[list(model_weights.keys())[-1]])
-        self.fc = nn.Conv2d(
-            self.channels[-1],
-            num_classes,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=True,
-        )
-        self.load_state_dict(model_weights, strict=False)
+
+        model_state_dict = self.state_dict()
+        for key in model_state_dict.keys():
+            if (
+                key in model_weights.keys()
+                and model_state_dict[key].shape == model_weights[key].shape
+            ):
+                model_state_dict[key] = model_weights[key]
+        self.load_state_dict(model_state_dict)
 
 
 def get_model_url(data="imagenet", name="dla34", hash="ba72cf86"):
@@ -383,36 +387,61 @@ class DeformConv(nn.Module):
     Deformable ConvNets v2: More Deformable, Better Results
     link: https://arxiv.org/abs/1811.11168
     """
-    def __init__(self, in_channels, out_channels):
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        dilation=1,
+        groups: int = 1,
+        bias: bool = True,
+        activation: bool = False,
+    ):
         super(DeformConv, self).__init__()
+
+        if in_channels % groups != 0:
+            raise ValueError("in_channels must be divisible by groups")
+        if out_channels % groups != 0:
+            raise ValueError("out_channels must be divisible by groups")
+
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.kernel_size = _pair(3)
-        self.stride = _pair(1)
-        self.padding = _pair(1)
-        self.dilation = _pair(1)
+        self.kernel_size = _pair(kernel_size)
+        self.stride = _pair(stride)
+        self.padding = _pair(padding)
+        self.dilation = _pair(dilation)
+        self.groups = groups
 
         # Declare activation function
-        self.activation = nn.Sequential(
-            nn.BatchNorm2d(out_channels, momentum=0.1), nn.ReLU(inplace=True)
-        )
+        self.activation = nn.Identity()
+        if activation:
+            self.activation = nn.Sequential(
+                nn.BatchNorm2d(out_channels, momentum=0.1), nn.ReLU(inplace=True)
+            )
 
         # Declare offset and mask layer and initialize to 0
         self.conv_offset_mask = nn.Conv2d(
             in_channels,
             3 * self.kernel_size[0] * self.kernel_size[1],
             kernel_size=self.kernel_size,
-            stride=_pair(1),
-            padding=_pair(1),
-            bias=True,
+            stride=_pair(self.stride),
+            padding=_pair(self.padding),
+            bias=bias,
         )
         self.conv_offset_mask.weight.data.zero_()
-        self.conv_offset_mask.bias.data.zero_()
+        if bias:
+            self.conv_offset_mask.bias.data.zero_()
 
         self.weight = nn.Parameter(
-            torch.Tensor(out_channels, in_channels, *self.kernel_size)
+            torch.Tensor(out_channels, in_channels // groups, *self.kernel_size)
         )
-        self.bias = nn.Parameter(torch.Tensor(out_channels))
+        if bias:
+            self.bias = nn.Parameter(torch.Tensor(out_channels))
+        else:
+            self.register_parameter("bias", None)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -442,6 +471,23 @@ class DeformConv(nn.Module):
         x = self.activation(x)
         return x
 
+    def extra_repr(self) -> str:
+        s = (
+            f"{self.in_channels}"
+            f", {self.out_channels}"
+            f", kernel_size={self.kernel_size}"
+            f", stride={self.stride}"
+        )
+        s += f", padding={self.padding}" if self.padding != (0, 0) else ""
+        s += f", dilation={self.dilation}" if self.dilation != (1, 1) else ""
+        s += f", groups={self.groups}" if self.groups != 1 else ""
+        s += ", bias=False" if self.bias is None else ""
+        return s
+
+    def __repr__(self) -> str:
+        s = f"{self.__class__.__name__}({self.extra_repr()})"
+        return s
+
 
 class IDAUp(nn.Module):
     def __init__(
@@ -450,8 +496,8 @@ class IDAUp(nn.Module):
         super(IDAUp, self).__init__()
         for i in range(1, len(in_channels)):
             f = int(up_f[i])
-            proj = node_type[0](in_channels[i], out_channels)
-            node = node_type[1](out_channels, out_channels)
+            proj = node_type[0](in_channels[i], out_channels, activation=True)
+            node = node_type[1](out_channels, out_channels, activation=True)
 
             up = nn.ConvTranspose2d(
                 out_channels,
@@ -519,16 +565,37 @@ DLA_NODE = {
     "Conv": (Conv, Conv),
 }
 
+N_PC_CHANNELS = {"nuscenes": 3}
+
 
 class DLASeg(BaseModel):
-    def __init__(self, num_layers, config):
-        super(DLASeg, self).__init__(1, 64 if num_layers == "34" else 128, config=config)
+    def __init__(self, num_layers, in_channels, config):
+        self.isRadarEnabled = config.DATASET.RADAR_PC
+        self.fusionStrategy = config.MODEL.FUSION_STRATEGY
+        maxPcDist = int(config.DATASET.MAX_PC_DIST)
+        oneHotPc = config.DATASET.ONE_HOT_PC * maxPcDist
+        dataset = config.DATASET.DATASET
+        config.defrost()
+        config.MODEL.PYRAMID_OUT_SIZE = [config.MODEL.OUTPUT_SIZE]
+        config.freeze()
+
+        in_channels_head = [64 if num_layers == "34" else 128]
+        nPcChannels = N_PC_CHANNELS[dataset] * max(1, oneHotPc)
+        PC_CHANNELS = {k: 0 for k in ["deep", "middle2", "module", "module2", "deep3"]}
+        PC_CHANNELS = {k: v + nPcChannels for k, v in PC_CHANNELS.items()}
+
+        if self.isRadarEnabled and self.fusionStrategy in PC_CHANNELS:
+            in_channels_head.append(PC_CHANNELS[self.fusionStrategy])
+        self.in_channels_head = [in_channels_head]
+
+        super(DLASeg, self).__init__(config=config)
         down_ratio = 4
-        self.config = config
         self.node_type = DLA_NODE[config.MODEL.DLA.NODE]
         self.first_level = int(np.log2(down_ratio))
         self.last_level = 5
-        self.base = getModel("dla34", pretrained=(config.MODEL.LOAD_DIR == ""))
+        self.base = getModel(
+            "dla34", pretrained=(config.MODEL.LOAD_DIR == ""), in_channels=in_channels
+        )
 
         channels = self.base.channels
         scales = [2**i for i in range(len(channels[self.first_level :]))]
@@ -547,13 +614,22 @@ class DLASeg(BaseModel):
             node_type=self.node_type,
         )
 
+        # freeze backbone network
+        if config.MODEL.FREEZE_BACKBONE:
+            for model in [self.base, self.dla_up, self.ida_up]:
+                for param in model.parameters():
+                    param.requires_grad = False
+
+        # Transform backbone to traced model
+        if config.MODEL.NORM_EVAL:
+            self.base = self.transform(self.base)
+
     def img2feats(self, x):
         x = self.base(x)
         x = self.dla_up(x)
-
         y = []
         for i in range(self.last_level - self.first_level):
             y.append(x[i].clone())
         self.ida_up(y, 0, len(y))
 
-        return [y[-1]]
+        return y[-1]

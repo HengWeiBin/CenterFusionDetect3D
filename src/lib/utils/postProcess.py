@@ -3,120 +3,83 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import cv2
+import torch
+
 from .image import affineTransform, getAffineTransform
-from .ddd import cvtImgToCamCoord
-import math
+from utils.ddd import cvtImgToCamCoord, get3dBox
+from .pointcloud import get_alpha
 
 
-def get_alpha(rot):
-    """
-    Get the alpha angle from the rotation vector
-
-    Args:
-        rot: rotation vector (B, 8) [bin1_cls[0], bin1_cls[1], bin1_sin, bin1_cos,
-                                      bin2_cls[0], bin2_cls[1], bin2_sin, bin2_cos]
-
-    Returns:
-        alpha: alpha angle (B, 1)
-    """
-    idx = rot[:, 1] > rot[:, 5]
-    alpha1 = np.arctan2(rot[:, 2], rot[:, 3]) + (-0.5 * np.pi)
-    alpha2 = np.arctan2(rot[:, 6], rot[:, 7]) + (0.5 * np.pi)
-    return alpha1 * idx + alpha2 * (1 - idx)
-
-
-def postProcess(
-    config, detects, centers, scales, height, width, calibs=None, is_gt=False
-):
+def postProcess(y, center, scale, height, width, calibs, isGt=False):
     """
     This function post-processes the output of the network to get the final predictions
 
     Args:
-        config: yacs config object
-        detects: output of the network
-        centers: centers of the image
-        scales: scales of the image
+        y: output of the network
+        center: center of the image
+        scale: scale of the image
         height: height of the output
         width: width of the output
         calibs: calibration matrices
-        is_gt: whether the output is ground truth or not
+        isGt: whether the output is ground truth or not
+
+    Returns:
+        y: post-processed output
     """
-    if not ("scores" in detects):
-        return [{}], [{}]
-    ret = []
+    batch_size, K = y["scores"].shape
 
-    for i in range(len(detects["scores"])):
-        preds = []
-        transMat = getAffineTransform(
-            centers[i], scales[i], 0, (width, height), inverse=True
-        ).astype(np.float32)
-        for j in range(len(detects["scores"][i])):
-            if detects["scores"][i][j] < -1:
-                break
-            item = {}
-            item["score"] = detects["scores"][i][j]
-            item["class"] = int(detects["classes"][i][j]) + 1
-            item["center"] = affineTransform(
-                (detects["centers"][i][j]).reshape(1, 2), transMat
-            ).reshape(2)
+    transMat = getAffineTransform(
+        center, scale, 0, (width, height), inverse=True
+    ).astype(np.float32)
 
-            if "bboxes" in detects:
-                bbox = affineTransform(
-                    detects["bboxes"][i][j].reshape(2, 2), transMat
-                ).reshape(4)
-                item["bbox"] = bbox
+    y["classIds"] += 1
+    y["centers"] = y["centers"] * torch.tensor(
+        [width, height], device=y["centers"].device
+    )
+    
+    if "bboxes" in y:
+        y["bboxes"] = affineTransform(y["bboxes"].view(-1, 2), transMat).reshape(
+            batch_size, K, 4
+        )
 
-            if "depth" in detects and len(detects["depth"][i]) > j:
-                item["depth"] = detects["depth"][i][j]
-                if len(item["depth"]) > 1:
-                    item["depth"] = item["depth"][0]
+    if "depth" in y:
+        y["depth"] = y["depth"].view(batch_size, K)
 
-            if "dimension" in detects and len(detects["dimension"][i]) > j:
-                item["dimension"] = detects["dimension"][i][j]
+    if "rotation" in y:
+        y["alpha"] = get_alpha(y.pop("rotation").view(-1, 8)).view(batch_size, K)
 
-            if "rotation" in detects and len(detects["rotation"][i]) > j:
-                item["alpha"] = get_alpha(detects["rotation"][i][j : j + 1])[0]
+    # Decode 3D bounding boxes
+    if {"alpha", "depth", "dimension"} <= set(y):
+        # if rotation, depth and dimension are available
+        ## Apply amodal offset to center if available
+        if not isGt and "amodal_offset" in y:
+            amodalCenter = y["centers"] + y["amodal_offset"]
+            centers = affineTransform(amodalCenter.view(-1, 2), transMat).view(
+                batch_size, K, 2
+            )
+            y["centers"] = centers
 
-            if (
-                "rotation" in detects
-                and "depth" in detects
-                and "dimension" in detects
-                and len(detects["depth"][i]) > j
-            ):
-                if "amodal_offset" in detects and len(detects["amodal_offset"][i]) > j:
-                    centerOut = detects["bboxes"][i][j].reshape(2, 2).mean(axis=0)
-                    amodalCenterOut = centerOut + detects["amodal_offset"][i][j]
-                    center = (
-                        affineTransform(amodalCenterOut.reshape(1, 2), transMat)
-                        .reshape(2)
-                        .tolist()
-                    )
-                else:
-                    bbox = item["bbox"]
-                    center = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]
+        ## Use 2D bounding box center if amodal offset is not available
+        elif not isGt and "bboxes" in y:
+            centers = y["bboxes"].view(batch_size, K, 2, 2).mean(dim=2)
+            y["centers"] = centers
 
-                item["center"] = center
-                item["location"], item["yaw"] = cvtImgToCamCoord(
-                    center, item["alpha"], item["dimension"], item["depth"], calibs[i]
-                )
+        ## Else use the 2D detection center from above
 
-            preds.append(item)
+        y["locations"], y["yaws"] = cvtImgToCamCoord(
+            y["centers"], y["alpha"], y["dimension"], y["depth"], calibs
+        )
 
-        if "nuscenes_att" in detects:
-            for j in range(len(preds)):
-                preds[j]["nuscenes_att"] = detects["nuscenes_att"][i][j]
+    if not isGt and {"velocity", "yaws"} <= set(y):
+        # if velocity and yaw are available
+        ## put velocity in the same direction as box orientation
+        V = torch.sqrt(y["velocity"][:, :, 0] ** 2 + y["velocity"][:, :, 2] ** 2)
+        y["velocity"][:, :, 0] = torch.cos(y["yaws"]) * V
+        y["velocity"][:, :, 2] = -torch.sin(y["yaws"]) * V
 
-        if "velocity" in detects:
-            for j in range(len(preds)):
-                vel = detects["velocity"][i][j]
-                if config.DATASET.NUSCENES.RADAR_PC and not is_gt:
-                    ## put velocity in the same direction as box orientation
-                    V = math.sqrt(vel[0] ** 2 + vel[2] ** 2)
-                    vel[0] = np.cos(preds[j]["yaw"]) * V
-                    vel[2] = -np.sin(preds[j]["yaw"]) * V
-                preds[j]["velocity"] = vel[:3]
+    if {"dimension", "locations", "yaws"} <= set(y):
+        # if dimension, location and yaw are available
+        y["bboxes3d"] = get3dBox(y["dimension"], y["locations"], y["yaws"])
+        y["bboxes3d"][torch.any(y["dimension"] <= 0, dim=2)] = 0
 
-        ret.append(preds)
-
-    return ret
+    return y

@@ -13,6 +13,7 @@ def topk(heatmap, K=100):
 
     Returns:
         topk_heat: heatmap of the top k elements
+        topk_heats: heatmap of the top k elements in onehot format
         topk_inds: indices of the top k elements in input heatmap
         topk_classes: classes of the top k elements
         topk_ys: y coordinates of the top k elements
@@ -111,6 +112,7 @@ def initUpModuleWeights(up):
 def nms(heatmap, kernel=3):
     """
     Performs non-maximum suppression on the heatmap
+    Retains the local maxima of the heatmap
 
     Args:
         heatmap: heatmap
@@ -125,15 +127,26 @@ def nms(heatmap, kernel=3):
     keep = (hmax == heatmap).float()
     return heatmap * keep
 
-def sigmoid(x):
+
+def sigmoidDepth(x):
     """
-    Applies sigmoid function to the input
+    Sigmoid function for depth
 
     Args:
-        x: input
+        x: input tensor
 
     Returns:
-        sigmoid(x)
+        sigmoid of x
     """
-    y = torch.clamp(x.sigmoid_(), min=1e-4, max=1-1e-4)
-    return y
+    return 1.0 / (x.sigmoid() + 1e-6) - 1.0
+
+
+def dictToCuda(dict_):
+    for key in dict_:
+        if isinstance(dict_[key], dict):
+            dict_[key] = dictToCuda(dict_[key])
+        elif isinstance(dict_[key], torch.Tensor):
+            dict_[key] = dict_[key].cuda()
+        else:
+            continue
+    return dict_

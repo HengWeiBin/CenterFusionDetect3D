@@ -3,74 +3,82 @@ CUDNN:
   BENCHMARK: true
   DETERMINISTIC: false
   ENABLED: true
-GPUS:                             # -1 for CPU
+GPUS:                           # -1 for CPU
 - 0
 WORKERS: 0
-DEBUG: 0                          # 0: no debug, 1: show debug images, 2: save debug images
-EVAL: true                        # only evaluate the val split and quit
+DEBUG: 0                        # 0: no debug, 1: show debug images, 2: save debug images
+EVAL: false                     # only evaluate the val split and quit
 RANDOM_SEED: 0
 MIXED_PRECISION: false
-CONF_THRESH: 0.3                  # confidence threshold for visualization
+CONF_THRESH: 0.3                # confidence threshold for visualization
+WANDB_RESUME: false
+WANDB_RESUBMIT : false          # resubmit old logs to wandb
 
 DATASET:
-  DATASET: 'nuscenes'             # currently support nuscenes only
+  DATASET: 'nuscenes'          # currently only nuscenes is supported
   ROOT: data/
-  RANDOM_CROP: false              # random crop data augmentation from CornerNet
-  MAX_CROP: true                  # used when the training dataset has inbalanced aspect ratios
-  SHIFT: 0.2                      # shift augmentation
-  SCALE: 0                        # scale augmentation
-  ROTATE: 0                       # rotation augmentation
-  FLIP: 0.5                       # flip augmentation
-  COLOR_AUG: true                 # color augmenation from CornerNet
-  TRAIN_SPLIT: 'mini_train'       # ['train','mini_train']
-  VAL_SPLIT: 'mini_val'           # ['val','mini_val','test']
-  NUSCENES:
-    RADAR_PC: true                # use radar point cloud
-    MAX_PC: 1000                  # maximum number of points in the point cloud
-    MAX_PC_DIST: 60.0             # remove points beyond max_pc_dist (meters)
-    PC_Z_OFFSET: 0.0              # raise all Radar points in z direction
-    PC_ROI_METHOD: 'pillars'      # pillars or heatmap
-    PILLAR_DIMS: (1.5, 0.2, 0.2)  # Radar pillar dimensions (h,w,l)
+  RANDOM_CROP: false            # random crop data augmentation from CornerNet
+  MAX_CROP: true                # used when the training dataset has inbalanced aspect ratios
+  SHIFT: 0.2                    # shift augmentation
+  SCALE: 0                      # scale augmentation
+  ROTATE: 0                     # rotation augmentation
+  FLIP: 0.5                     # flip augmentation
+  COLOR_AUG: true               # color augmenation from CornerNet
+  TRAIN_SPLIT: 'mini_val'            # ['train','mini_train']
+  VAL_SPLIT: 'mini_val'              # ['val','mini_val','test']
+  RADAR_PC: true                # use radar point cloud
+  MAX_PC: 1000                  # maximum number of points in the point cloud
+  MAX_PC_DIST: 60.0            # remove points beyond max_pc_dist (meters)
+  PC_Z_OFFSET: 0.0              # raise all Radar points in z direction
+  PC_ROI_METHOD: 'pillars'      # pillars or heatmap
+  PILLAR_DIMS: (1.5, 0.2, 0.2)  # Radar pillar dimensions (h,w,l)
+  ONE_HOT_PC: false
+  DECOUPLE_REP: false           # decouple representation of object from MonoFlex
+  HEATMAP_REP: 2d              # ['2d', '3d']
 
 MODEL:
-  LOAD_DIR: 'models/centernet_baseline_e170.pth'
+  LOAD_DIR: "models/centerfusion_e230.pt" #'models/CenterFusion_e230.pth'
   ARCH: "dla_34"                  # model architecture
-  FREEZE_BACKBONE: false          # freeze the backbone network and only train heads
-  FUSION_STRATEGY: 'middle' # TODO
+  FREEZE_BACKBONE: true         # freeze the backbone network and only train heads
+  FUSION_STRATEGY: 'middle'     # ['early', 'middle']
+  NORM_EVAL: false               # freeze the backbone batchnorm during training
+  NORM_2D: false                 # normalize any 2D input/output
+  DEFREEZE: 170                 # epoch to defreeze backbone (-1: no defreeze)
   INPUT_SIZE: (448, 800)
-  FRUSTUM: true                   # Enable frustum association
-  K: 100                          # max number of output objects
-  GENERIC_NET:
-    BACKBONE: "dla34"
-    NECK: "dlaup"
+  FRUSTUM: true                 # Enable frustum association
+  K: 100                        # max number of output objects
   DLA:
-    NODE: "DeformConv"            # [DeformConv | GlobalConv | Conv]
+    NODE: "DeformConv"          # [DeformConv | GlobalConv | Conv]
 
-LOSS:
-  NUSCENES_ATT: true
-  VELOCITY: true
-  WEIGHTS:
-    HEATMAP: 1                    # keypoint heatmaps
-    AMODAL_OFFSET: 1              # keypoint local offsets
-    BBOX: 0.1                     # bounding box size
-    DEPTH: 1                      # depthloss weight for depth
-    DIMENSION: 1                  # 3d bounding box size
-    ROTATION: 1                   # orientation
-    NUSCENES_ATT: 1               # nuscenes attribute
-    VELOCITY: 1                   # velocity
+LOSS_WEIGHTS:
+  HEATMAP: 1.0                  # keypoint heatmaps
+  AMODAL_OFFSET: 1.0            # keypoint local offsets
+  DIMENSION_2D: 0.1             # 2d bounding box size
+  DEPTH: 1.0                    # depthloss weight for depth
+  DIMENSION_3D: 1.0             # 3d bounding box size
+  ROTATION: 1.0                 # orientation
+  NUSCENES_ATT: 1.0             # nuscenes attribute
+  VELOCITY: 1.0                 # velocity
+  BBOX_2D: 0.0                  # 2d bounding box
+  BBOX_3D: 0.0                  # 3d bounding box  
+  LIDAR_DEPTH: 0.0              # auxiliary lidar depth loss
+  RADAR_DEPTH: 0.0              # auxiliary radar depth loss
 
 TRAIN:
-  BATCH_SIZE: 1
+  BATCH_SIZE: 8
   SHUFFLE: true                   # shuffle training dataloader
-  EPOCHS: 60
+  EPOCHS: 888
   RESUME: false
+  WARM_EPOCHS: 5                  # number of warmup epochs
   OPTIMIZER: adam
-  LR: 2.5e-4
+  LR: 2.5e-4                      # learning rate
   LR_STEP: (50,)                  # drop learning rate step
+  LR_SCHEDULER: StepLR               # CLR | StepLR
   SAVE_INTERVALS: 10              # interval to save model
   VAL_INTERVALS: 1                # number of epochs to run validation
   SCALE_FACTOR: 16
+  UNCERTAINTY_LOSS: false         # enable auxiliary uncertainty depth loss
 
 TEST:
-  BATCH_SIZE: 1
-  OFFICIAL_EVAL: true             # use official evaluation script
+  BATCH_SIZE: 32
+  OFFICIAL_EVAL: false             # use official evaluation script

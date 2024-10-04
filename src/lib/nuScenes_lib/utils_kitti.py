@@ -158,7 +158,7 @@ class KittiDB:
         :param box: 3D box in KITTI reference frame.
         :param p_left: <np.float: 3, 4>. Projection matrix.
         :param imsize: (width, height). Image size.
-        :return: (xmin, ymin, xmax, ymax). Bounding box in image plane or None if box is not in the image.
+        :return: (xmin, ymin, xmax, ymax). Bounding box in image plane or None if box is not in the image., truncated
         """
 
         # Create a new box.

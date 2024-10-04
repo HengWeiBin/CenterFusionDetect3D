@@ -5,3 +5,9 @@ output/
 *.pth
 wandb/
 *.pt
+**/lightning_logs/
+*.mp4
+tensorboard_logs/
+data/nuscenes
+src/integrationTest/
+src/integrationTest.py

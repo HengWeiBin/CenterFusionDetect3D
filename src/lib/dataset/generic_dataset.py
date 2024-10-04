@@ -8,7 +8,8 @@ import cv2
 import os
 import pycocotools.coco as coco
 import torch
-from timeit import default_timer as timer
+import time
+from pathlib import Path
 from torchvision.transforms import (
     ColorJitter,
     Normalize,
@@ -17,6 +18,7 @@ from torchvision.transforms import (
     RandomOrder,
     ToTensor,
 )
+from lightning.pytorch.utilities import rank_zero_only
 
 from utils.image import (
     getAffineTransform,
@@ -26,13 +28,14 @@ from utils.image import (
     drawGaussianHeatRegion,
 )
 from utils.pointcloud import (
-    map_pointcloud_to_image,
     getDistanceThresh,
     cvtPcDepthToHeatmap,
 )
-from utils.pointcloud import RadarPointCloudWithVelocity as RadarPointCloud
 from utils.ddd import get3dBox, project3DPoints, draw3DBox
 from utils.image import getGaussianRadius
+from utils.utils import safe_run, createFolder, AverageMeter
+from config import config, updateDatasetAndModelConfig
+import warnings
 
 
 class GenericDataset(torch.utils.data.Dataset):
@@ -74,8 +77,11 @@ class GenericDataset(torch.utils.data.Dataset):
             self.split = split
             self.config = config
             self.enable_meta = (
-                config.TEST.OFFICIAL_EVAL and split in ["val", "mini_val", "test"]
-            ) or config.EVAL
+                (config.TEST.OFFICIAL_EVAL and split in ["val", "mini_val", "test"])
+                or config.EVAL
+                or config.weights.bbox3d > 0
+            )
+            self.temporal = False
 
         if ann_path is not None and img_dir is not None:
             self.coco = coco.COCO(ann_path)
@@ -83,8 +89,6 @@ class GenericDataset(torch.utils.data.Dataset):
             self.img_dir = img_dir
 
         # initiaize the color augmentation
-        self.mean = np.array([0.40789654, 0.44719302, 0.47026115], dtype=np.float32)
-        self.std = np.array([0.28863828, 0.27408164, 0.27809835], dtype=np.float32)
         self.colorAugmentor = Compose(
             [
                 ToTensor(),
@@ -99,8 +103,12 @@ class GenericDataset(torch.utils.data.Dataset):
                 Normalize(self.mean, self.std),
             ]
         )
+        self.sizeThresh = [
+            [0, 0.0018, 0.0085][l]
+            for l in range(len(self.config.MODEL.PYRAMID_OUT_SIZE))
+        ]
 
-    def __getitem__(self, index):
+    def __getitem__(self, index, prev=False):
         """
         item:
             image: image after augmentation
@@ -109,28 +117,21 @@ class GenericDataset(torch.utils.data.Dataset):
             pc_3d: radar point cloud in camera coordinate
             pc_N: number of radar point cloud
             pc_dep: radar point cloud depth
+            pc_hm: radar point cloud heatmap [depth, vel_x, vel_z]
             heatmap: heatmap for each class
-            indices: indices for get feature map
             classIds: class id
             mask: all mask show which data is valid
-            pc_hm: radar point cloud heatmap [depth, vel_x, vel_z]
+            truncMask: mask for truncation
             widthHeight: width and height of bounding box (w, h)
-            widthHeight_mask: all mask show which data is valid
             reg: diffence between center(float) and center_int
-            reg_mask: all mask show which data is valid
             depth: depth(m)
-            depth_mask: depth mask
             dimension: dimension of object (h, w, l)
-            dimension_mask: dimension mask
             amodal_offset: amodal offset from bbox center
-            amodal_offset_mask: amodal offset mask
             nuscenes_att: nuscenes attribute (mask)
             nuscenes_att_mask: nuscenes attribute (range mask)
             velocity: velocity
-            velocity_mask: velocity mask
             rotbin: rotation bin
             rotres: rotation residual
-            rotation_mask: rotation mask
             meta: meta data
         """
         # ====== Load Image and Annotation ====== #
@@ -165,7 +166,11 @@ class GenericDataset(torch.utils.data.Dataset):
             if np.random.random() < self.config.DATASET.FLIP:
                 isFliped = True
                 img = img[:, ::-1, :]
-                anns = self.filpAnnotations(anns, img_info["width"])
+                anns = self.flipAnnotations(
+                    anns,
+                    img_info["width"],
+                    getattr(img_info, "velocity_trans_matrix", None),
+                )
 
         # ====== Get the affine transformation matrix ====== #
         transMatInput = getAffineTransform(
@@ -186,13 +191,17 @@ class GenericDataset(torch.utils.data.Dataset):
         }
 
         # ====== Load Radar Point Cloud ====== #
-        if self.config.DATASET.NUSCENES.RADAR_PC:
+        if self.config.DATASET.RADAR_PC:
             pc_2d, pc_N, pc_dep, pc_3d = self.loadRadarPointCloud(
                 img, img_info, transMatInput, transMatOutput, isFliped
             )
             item.update(
                 {"pc_2d": pc_2d, "pc_3d": pc_3d, "pc_N": pc_N, "pc_dep": pc_dep}
             )
+
+        if self.config.LOSS_WEIGHTS.LIDAR_DEPTH > 0:
+            pc_lidar = self.loadLidarPointCloud(img_info, isFliped)
+            item["pc_lidar"] = pc_lidar
 
         # ====== Initialize the return variables ====== #
         target = {}
@@ -206,10 +215,6 @@ class GenericDataset(torch.utils.data.Dataset):
                 continue
             bbox = self.transformBbox(ann["bbox"], transMatOutput)
 
-            if classId <= 0 or ("iscrowd" in ann and ann["iscrowd"] > 0):
-                self._mask_ignore_or_crowd(item, classId, bbox)
-                continue
-
             self.addInstance(
                 item,
                 target,
@@ -220,6 +225,24 @@ class GenericDataset(torch.utils.data.Dataset):
                 transMatOutput,
                 scaleFactor,
             )
+
+        if self.config.DATASET.RADAR_PC and not self.config.MODEL.FRUSTUM:
+            item["pc_hm"] = item["pc_dep"].copy()
+            # normalize depth
+            maxDist = self.config.DATASET.MAX_PC_DIST
+            if self.config.DATASET.ONE_HOT_PC:
+                item["pc_hm"][: int(maxDist)] /= maxDist
+                item["pc_hm"][: int(maxDist)] = 1 - item["pc_hm"][: int(maxDist)]
+            else:
+                item["pc_hm"][0] /= maxDist
+                item["pc_hm"][0] = 1 - item["pc_hm"][0]
+        item["target"] = target
+
+        # ====== Get previous frame data ====== #
+        if self.temporal and not prev:
+            prev_id = img_info["prev_id"]
+            prev_item = self.__getitem__(prev_id, prev=True)
+            item["prev"] = prev_item
 
         # ====== Debug ====== #
         if self.config.DEBUG > 0 or self.enable_meta:
@@ -234,14 +257,13 @@ class GenericDataset(torch.utils.data.Dataset):
             meta = {
                 "center": center,
                 "scale": scale,
-                "target": target,
                 "img_id": img_info["id"],
                 "img_path": img_path,
-                "calib": calib,
                 "img_width": img_info["width"],
                 "img_height": img_info["height"],
                 "isFliped": isFliped,
                 "velocity_mat": velocity_mat,
+                "target": target,
             }
             item["meta"] = meta
 
@@ -349,7 +371,7 @@ class GenericDataset(torch.utils.data.Dataset):
 
         return center, scaleFactor, rotateFactor
 
-    def filpAnnotations(self, anns, width):
+    def flipAnnotations(self, anns, width, vel_trans_mat=None):
         """
         This function flips the annotations horizontally.
         It does this by flipping the bounding boxes, the rotation angles,
@@ -376,8 +398,16 @@ class GenericDataset(torch.utils.data.Dataset):
             if "amodal_offset" in self.config.heads and "amodal_center" in anns[k]:
                 anns[k]["amodal_center"][0] = width - anns[k]["amodal_center"][0] - 1
 
-            if self.config.LOSS.VELOCITY and "velocity" in anns[k]:
+            if (
+                self.config.DATASET.RADAR_PC
+                and "velocity" in anns[k]
+                and vel_trans_mat is not None
+            ):
                 anns[k]["velocity"][0] *= -1
+
+                vel = anns[k]["velocity"]
+                vel = np.array([vel[0], vel[1], vel[2], 0], np.float32)
+                anns[k]["velocity_cam"] = np.dot(np.linalg.inv(vel_trans_mat), vel)
 
         return anns
 
@@ -414,46 +444,38 @@ class GenericDataset(torch.utils.data.Dataset):
 
         Args:
             item (dict): The dictionary to be returned.
-            target (dict): The dictionary containing the annotations.
+            target (dict): The dictionary containing the empty annotations.
+                |- bboxes (np.array): [max_objs, 4] (xyxy)
+                |- scores (np.array): [max_objs]
+                |- centers (np.array): [max_objs, 2]
+                |- widthHeight (np.array): [max_objs, 2]
+                |- reg (np.array): [max_objs, 2]
+                |- depth (np.array): [max_objs]
+                |- dimension (np.array): [max_objs, 3]
+                |- amodal_offset (np.array): [max_objs, 2]
+                |- rotation (np.array): [max_objs, 8]
+                |- bboxes3d (np.array): [max_objs, 8, 3]
 
         Returns:
             None
         """
-        item["heatmap"] = np.zeros(
-            (
-                self.num_categories,
-                self.config.MODEL.OUTPUT_SIZE[0],
-                self.config.MODEL.OUTPUT_SIZE[1],
-            ),
-            np.float32,
-        )
-        item["indices"] = np.zeros((self.max_objs), dtype=np.int64)
+        for i, (h, w) in enumerate(self.config.MODEL.PYRAMID_OUT_SIZE):
+            item[f"heatmap{i}"] = np.zeros((self.num_categories, h, w), np.float32)
         item["classIds"] = np.zeros((self.max_objs), dtype=np.int64)
         item["mask"] = np.zeros((self.max_objs), dtype=np.float32)
+        item["truncMask"] = np.zeros((self.max_objs), dtype=np.float32)
+        item["widthHeight"] = np.zeros((self.max_objs, 2), dtype=np.float32)
 
         target["bboxes"] = np.zeros((self.max_objs, 4), dtype=np.float32)
         target["scores"] = np.zeros((self.max_objs), dtype=np.float32)
-        target["classIds"] = np.zeros((self.max_objs), dtype=np.int64)
         target["centers"] = np.zeros((self.max_objs, 2), dtype=np.float32)
-
-        if self.config.DATASET.NUSCENES.RADAR_PC:
-            item["pc_hm"] = np.zeros(
-                (
-                    3,
-                    self.config.MODEL.OUTPUT_SIZE[0],
-                    self.config.MODEL.OUTPUT_SIZE[1],
-                ),
-                np.float32,
-            )
+        target["heatCenters"] = np.zeros((self.max_objs, 2), dtype=np.float32)
+        target["bboxes3d"] = np.zeros((self.max_objs, 8, 3), dtype=np.float32)
 
         regression_head_dims = {
-            "widthHeight": 2,
             "reg": 2,
-            "depth": 1,
             "dimension": 3,
             "amodal_offset": 2,
-            "nuscenes_att": 8,
-            "velocity": 3,
         }
 
         for head in regression_head_dims:
@@ -461,47 +483,14 @@ class GenericDataset(torch.utils.data.Dataset):
                 item[head] = np.zeros(
                     (self.max_objs, regression_head_dims[head]), dtype=np.float32
                 )
-                item[head + "_mask"] = np.zeros(
-                    (self.max_objs, regression_head_dims[head]), dtype=np.float32
-                )
-                target[head] = np.zeros(
-                    (self.max_objs, regression_head_dims[head]), dtype=np.float32
-                )
 
-        if "rotation" in self.config.heads:
+        if {f"depth{i if i else ''}" for i in range(5)} & set(self.config.heads):
+            item["depth"] = np.zeros((self.max_objs, 1), dtype=np.float32)
+
+        if {f"rotation{i if i else ''}" for i in range(5)} & set(self.config.heads):
             item["rotbin"] = np.zeros((self.max_objs, 2), dtype=np.int64)
             item["rotres"] = np.zeros((self.max_objs, 2), dtype=np.float32)
-            item["rotation_mask"] = np.zeros((self.max_objs), dtype=np.float32)
             target["rotation"] = np.zeros((self.max_objs, 8), dtype=np.float32)
-
-    def _mask_ignore_or_crowd(self, item, classId, bbox):
-        """
-        Mask out specific region(bbox) in heatmap.
-        Only single class is masked out if classId is specified.
-
-        Args:
-            item(dict): data item
-            classId(int): class id
-            bbox(array): [x1, y1, x2, y2]
-
-        Returns:
-            None
-        """
-        ignore_val = 1
-        if classId == 0:
-            # ignore all classes
-            # mask out crowd region
-            region = item["heatmap"][
-                :, int(bbox[1]) : int(bbox[3]) + 1, int(bbox[0]) : int(bbox[2]) + 1
-            ]
-        else:
-            # mask out one specific class
-            region = item["heatmap"][
-                abs(classId) - 1,
-                int(bbox[1]) : int(bbox[3]) + 1,
-                int(bbox[0]) : int(bbox[2]) + 1,
-            ]
-        np.maximum(region, ignore_val, out=region)
 
     def transformBbox(self, bbox, transMatOut):
         """
@@ -553,54 +542,110 @@ class GenericDataset(torch.utils.data.Dataset):
         height, width = bbox[3] - bbox[1], bbox[2] - bbox[0]
         if height <= 0 or width <= 0:
             return
-        radius = getGaussianRadius((math.ceil(height), math.ceil(width)))
-        radius = max(0, int(radius))
         center = np.array(
             [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32
         )
         center_int = center.astype(np.int32)
 
+        outputHeight, outputWidth = self.config.MODEL.OUTPUT_SIZE
         item["classIds"][i] = classId
         item["mask"][i] = 1
-        if "widthHeight" in item:
-            item["widthHeight"][i] = float(width), float(height)
-            item["widthHeight_mask"][i] = 1
-        item["indices"][i] = (
-            center_int[1] * self.config.MODEL.OUTPUT_SIZE[1] + center_int[0]
-        )
-        item["reg"][i] = center - center_int
-        item["reg_mask"][i] = 1
-        drawGaussianHeatRegion(item["heatmap"][classId], center_int, radius)
+        item["truncMask"][i] = ann["truncated"]
 
-        target["bboxes"][i] = np.array(
-            [
-                center[0] - width / 2,
-                center[1] - height / 2,
-                center[0] + width / 2,
-                center[1] + height / 2,
-            ],
-            dtype=np.float32,
+        # Get target layer for current bounding box
+        boxAreaPercent = (height * width) / (outputHeight * outputWidth)
+        for l in range(len(self.sizeThresh)):
+            thresh = self.sizeThresh[l : l + 2]
+            if len(thresh) == 1:
+                layer = len(self.sizeThresh) - 1
+            elif boxAreaPercent >= thresh[0] and boxAreaPercent < thresh[1]:
+                layer = l
+                break
+
+        # Convert bounding box coordinate to target layer
+        layerOutputHeight, layerOutputWidth = self.config.MODEL.PYRAMID_OUT_SIZE[layer]
+        heightScale = layerOutputHeight / outputHeight
+        widthScale = layerOutputWidth / outputWidth
+        layerBoxHeight = height * heightScale
+        layerBoxWidth = width * widthScale
+        amodal_center = (
+            affineTransform(
+                np.array(ann["amodal_center"]).reshape(1, -1), transMatOutput
+            )
+            if "amodal_center" in ann
+            else None
         )
-        target["scores"][i] = 1
-        target["classIds"][i] = classId
+
+        # Define the heatmap center
+        objOutside = False
+        if self.config.DATASET.HEATMAP_REP == "2d" or amodal_center is None:
+            heatCenter = center * np.array([widthScale, heightScale])
+        elif self.config.DATASET.HEATMAP_REP == "3d":
+            heatCenter = amodal_center.reshape(-1).copy()
+            heatCenter[0] = np.clip(heatCenter[0], 0, outputWidth - 1)
+            heatCenter[1] = np.clip(heatCenter[1], 0, outputHeight - 1)
+            if not (heatCenter == amodal_center).all():
+                objOutside = True
+        else:
+            raise ValueError(
+                f"Invalid heatmap representation: {self.config.DATASET.HEATMAP_REP}"
+            )
+
+        # Generate heatmap
+        if objOutside:
+            # for outside objects, generate 1-dimensional heatmap
+            edge_heatmap_ratio = 0.5
+            radius_x, radius_y = (
+                layerBoxWidth * edge_heatmap_ratio,
+                layerBoxHeight * edge_heatmap_ratio,
+            )
+            radius_x, radius_y = max(1, int(radius_x)), max(1, int(radius_y))
+            radius = (radius_x, radius_y)
+        else:
+            # for inside objects, generate circular heatmap
+            radius = getGaussianRadius(
+                (math.ceil(layerBoxHeight), math.ceil(layerBoxWidth))
+            )
+            radius = max(0, int(radius))
+        drawGaussianHeatRegion(item[f"heatmap{layer}"][classId], heatCenter, radius)
+
+        target["bboxes"][i] = bbox
         target["centers"][i] = center
+        target["heatCenters"][i] = heatCenter
 
-        if "nuscenes_att" in self.config.heads:
-            if ("attributes" in ann) and ann["attributes"] > 0:
-                att = int(ann["attributes"] - 1)
-                item["nuscenes_att"][i][att] = 1
-                item["nuscenes_att_mask"][i][self.nuscenes_att_range[att]] = 1
-            target["nuscenes_att"][i] = item["nuscenes_att"][i]
+        if "reg" in self.config.heads:
+            item["reg"][i] = center - heatCenter
 
-        if "velocity" in self.config.heads:
-            if ("velocity_cam" in ann) and min(ann["velocity_cam"]) > -1000:
-                item["velocity"][i] = np.array(ann["velocity_cam"], np.float32)[:3]
-                item["velocity_mask"][i] = 1
-            target["velocity"][i] = item["velocity"][i]
+        if "amodal_offset" in self.config.heads and amodal_center is not None:
+            item["amodal_offset"][i] = amodal_center - heatCenter
+            if self.config.MODEL.NORM_2D:
+                item["amodal_offset"][i] /= np.array([outputWidth, outputHeight])
+
+        if "widthHeight" in item:
+            item["widthHeight"][i] = (
+                (width / outputWidth, height / outputHeight)
+                if self.config.MODEL.NORM_2D
+                else (width, height)
+            )
+
+        if (
+            "nuscenes_att" in self.config.heads
+            and ("attributes" in ann)
+            and ann["attributes"] > 0
+        ):
+            att = int(ann["attributes"] - 1)
+            item["nuscenes_att"][i][att] = 1
+            item["nuscenes_att_mask"][i][self.nuscenes_att_range[att]] = 1
+
+        if (
+            "velocity" in self.config.heads
+            and ("velocity_cam" in ann)
+            and min(ann["velocity_cam"]) > -1000
+        ):
+            item["velocity"][i] = np.array(ann["velocity_cam"], np.float32)[:3]
 
         if "rotation" in self.config.heads:
             if "alpha" in ann:
-                item["rotation_mask"][i] = 1
                 alpha = ann["alpha"]
                 if alpha < np.pi / 6.0 or alpha > 5 * np.pi / 6.0:
                     item["rotbin"][i, 0] = 1
@@ -612,47 +657,34 @@ class GenericDataset(torch.utils.data.Dataset):
             else:
                 target["rotation"][i] = self.processAlpha(0)
 
-        if "depth" in self.config.heads and "depth" in ann:
+        if "depth" in ann and {"depth", "depth2"} & set(self.config.heads):
             item["depth"][i] = ann["depth"] * scaleFactor
-            item["depth_mask"][i] = 1
-            target["depth"][i] = item["depth"][i]
 
-        if "dimension" in self.config.heads:
-            if "dimension" in ann:
-                item["dimension"][i] = ann["dimension"]
-                item["dimension_mask"][i] = 1
-                target["dimension"][i] = item["dimension"][i]
-            else:
-                target["dimension"][i] = [1, 1, 1]
+        if "dimension" in self.config.heads and "dimension" in ann:
+            item["dimension"][i] = ann["dimension"]
 
-        if "amodal_offset" in self.config.heads:
-            if "amodal_center" in ann:
-                amodal_center = affineTransform(
-                    np.array(ann["amodal_center"]).reshape(1, -1), transMatOutput
-                )
-                item["amodal_offset"][i] = amodal_center - center_int
-                item["amodal_offset_mask"][i] = 1
-                target["amodal_offset"][i] = item["amodal_offset"][i]
-            else:
-                target["amodal_offset"][i] = [0, 0]
+        if {"dimension", "location", "yaw"} <= set(ann):
+            target["bboxes3d"][i] = get3dBox(
+                np.array(ann["dimension"]).reshape(1, 1, 3),
+                np.array(ann["location"]).reshape(1, 1, 3),
+                np.array(ann["yaw"]).reshape(1, 1),
+            )
 
-        if self.config.DATASET.NUSCENES.RADAR_PC:
-            if self.config.MODEL.FRUSTUM:
-                distanceThreshold = getDistanceThresh(
-                    item["calib"], center, ann["dimension"], ann["alpha"]
-                )
-                cvtPcDepthToHeatmap(
-                    item["pc_hm"],
-                    item["pc_dep"],
-                    ann["depth"],
-                    bbox,
-                    distanceThreshold,
-                    self.config.DATASET.NUSCENES.MAX_PC_DIST,
-                )
-            else:
-                item["pc_hm"] = item["pc_dep"]
-                # normalize depth
-                item["pc_hm"][0] /= self.config.DATASET.NUSCENES.MAX_PC_DIST
+        if self.config.DATASET.RADAR_PC and self.config.MODEL.FRUSTUM:
+            distanceThreshold = getDistanceThresh(
+                item["calib"].reshape(1, 3, 4),
+                center.reshape(1, 1, 2),
+                np.array(ann["dimension"]).reshape(1, 1, 3),
+                np.array(ann["alpha"]).reshape(1, 1, 1),
+            )[0, 0]
+            cvtPcDepthToHeatmap(
+                item["pc_hm"],
+                item["pc_dep"],
+                ann["depth"],
+                bbox,
+                distanceThreshold,
+                self.config.DATASET.MAX_PC_DIST,
+            )
 
     def processAlpha(self, alpha):
         """
@@ -675,85 +707,33 @@ class GenericDataset(torch.utils.data.Dataset):
             ret[6], ret[7] = np.sin(r), np.cos(r)
         return ret
 
-    def loadRadarPointCloud(
-        self, img, img_info, transMatInput, transMatOutput, isFlipped=False
-    ):
+    def loadRadarPointCloud(self, *_):
+        raise NotImplementedError
+
+    def loadLidarPointCloud(self, *_):
+        raise NotImplementedError
+
+    def getDepthMap(self, maxDistance: int, isOneHot: bool) -> np.ndarray:
         """
-        Load the Radar point cloud data
+        Due to the depthmap may be different in different dataset, we need to implement this function in the subclass.
 
         Args:
-            img: the original image
-            img_info: the image info
-            transMatInput: the transformation matrix from the original image to the input image
-            transMatOutput: the transformation matrix from the input image to the output image
-            isFlipped: whether the image is flipped
-
-        Returns:
-            pc_z: the 2D point cloud data [x, y, d]
-            pc_N: the original amount of points in 2D image
-            pc_dep: the depth feature map [d, vel_x, vel_z]
-            pc_3d: the 3D point cloud data in camera coordinate [x, y, z]
+            maxDistance(int): the maximum distance of the point cloud
         """
-        # Load radar point cloud from files
-        sensor_name = self.SENSOR_NAME[img_info["sensor_id"]]
-        sample_token = img_info["sample_token"]
-        sample = self.nusc.get("sample", sample_token)
-        all_radar_pcs = RadarPointCloud(np.zeros((18, 0)))
-        for radar_channel in self.RADARS_FOR_CAMERA[sensor_name]:
-            radar_pcs, _ = RadarPointCloud.from_file_multisweep(
-                self.nusc, sample, radar_channel, sensor_name, 6
-            )
-            all_radar_pcs.points = np.hstack((all_radar_pcs.points, radar_pcs.points))
-        radar_pc = all_radar_pcs.points
-        if radar_pc is None:
-            return None, None, None, None
+        raise NotImplementedError
 
-        # get distance to points
-        depth = radar_pc[2, :]
-        maxDistance = self.config.DATASET.NUSCENES.MAX_PC_DIST
+    def drawPcHeat(self, *_):
+        """
+        Draw the heatmap of the point cloud contained different values in different dataset,
+        we need to implement this function in the subclass.
+        """
+        raise NotImplementedError
 
-        # filter points by distance
-        if maxDistance > 0:
-            mask = depth <= maxDistance
-            radar_pc = radar_pc[:, mask]
-            depth = depth[mask]
-
-        # add z offset to radar points / raise all Radar points in z direction
-        if self.config.DATASET.NUSCENES.PC_Z_OFFSET != 0:
-            radar_pc[1, :] -= self.config.DATASET.NUSCENES.PC_Z_OFFSET
-
-        # map points to the image and filter ones outside
-        pc_2d, mask = map_pointcloud_to_image(
-            radar_pc,
-            np.array(img_info["camera_intrinsic"]),
-            img_shape=(img_info["width"], img_info["height"]),
-        )
-        pc_3d = radar_pc[:, mask]
-
-        # sort points by distance
-        index = np.argsort(pc_2d[2, :])
-        pc_2d = pc_2d[:, index]
-        pc_3d = pc_3d[:, index]
-
-        # flip points if image is flipped
-        if isFlipped:
-            pc_2d[0, :] = img.shape[1] - 1 - pc_2d[0, :]
-            pc_3d[0, :] *= -1  # flipping the x dimension
-            pc_3d[8, :] *= -1  # flipping x velocity (x is right, z is front)
-
-        pc_2d, pc_3d, pc_dep = self.processPointCloud(
-            pc_2d, pc_3d, img, transMatInput, transMatOutput, img_info
-        )
-        pc_N = np.array(pc_2d.shape[1])
-
-        # pad point clouds with zero to avoid size mismatch error in dataloader
-        n_points = min(self.config.DATASET.NUSCENES.MAX_PC, pc_2d.shape[1])
-        pc_z = np.zeros((pc_2d.shape[0], self.config.DATASET.NUSCENES.MAX_PC))
-        pc_z[:, :n_points] = pc_2d[:, :n_points]
-        pc_3dz = np.zeros((pc_3d.shape[0], self.config.DATASET.NUSCENES.MAX_PC))
-        pc_3dz[:, :n_points] = pc_3d[:, :n_points]
-
-        return pc_z, pc_N, pc_dep, pc_3dz
+    def drawPcPoints(self, *_):
+        """
+        Draw the point cloud points in the heatmap, we need to implement this function in the subclass.
+        """
+        raise NotImplementedError
 
     def processPointCloud(
         self, pc_2d, pc_3d, img, transMatInput, transMatOutput, img_info
@@ -775,14 +755,13 @@ class GenericDataset(torch.utils.data.Dataset):
             depthMap: the depthmap of the point cloud [d, vel_x, vel_z]
         """
         # initialize the depth map
-        outputWidth, outputHeight = (
-            self.config.MODEL.OUTPUT_SIZE[1],
-            self.config.MODEL.OUTPUT_SIZE[0],
-        )
+        outputWidth, outputHeight = self.config.MODEL.OUTPUT_SIZE[::-1]
         transformedPoints, mask = self.transformPointCloud(
             pc_2d, transMatOutput, outputWidth, outputHeight
         )
-        depthMap = np.zeros((3, outputHeight, outputWidth), np.float32)
+        isOneHot = self.config.DATASET.ONE_HOT_PC
+        maxDistance = int(self.config.DATASET.MAX_PC_DIST)
+        depthMap = self.getDepthMap(maxDistance, isOneHot)
 
         if mask is not None:
             pc_N = sum(mask)
@@ -791,24 +770,38 @@ class GenericDataset(torch.utils.data.Dataset):
         else:
             pc_N = pc_2d.shape[1]
 
-        # create point cloud pillars
-        if self.config.DATASET.NUSCENES.PC_ROI_METHOD == "pillars":
+        # generate point cloud channels
+        if self.config.DATASET.PC_ROI_METHOD == "pillars":
             boxesInput2D, pillar_wh = self.getPcPillarsSize(
                 img_info, pc_3d, transMatInput, transMatOutput
             )
             if self.config.DEBUG:
                 self.debugPillar(
-                    img, pc_2d, transMatInput, transMatOutput, boxesInput2D, pillar_wh
+                    img,
+                    pc_2d,
+                    transMatInput,
+                    transMatOutput,
+                    boxesInput2D,
+                    pillar_wh,
                 )
+        elif self.config.DATASET.PC_ROI_METHOD == "points":
+            depthMap = self.drawPcPoints(
+                depthMap,
+                transformedPoints[:2],  # x, y
+                transformedPoints[2],  # depth
+                maxDistance,
+                isOneHot,
+                pc_3d,
+            )
+            return transformedPoints, pc_3d, depthMap
 
-        # generate point cloud channels
-        for i in range(pc_N - 1, -1, -1):
+        for i in range(pc_N):
             point = transformedPoints[:, i]
             depth = point[2]
-            center = np.array([point[0], point[1]])
-            method = self.config.DATASET.NUSCENES.PC_ROI_METHOD
+            center = point[:2]
+            method = self.config.DATASET.PC_ROI_METHOD
             if method == "pillars":
-                bbox = [
+                box = [
                     max(center[1] - pillar_wh[1, i], 0),  # y1
                     center[1],  # y2
                     max(center[0] - pillar_wh[0, i] / 2, 0),  # x1
@@ -820,18 +813,19 @@ class GenericDataset(torch.utils.data.Dataset):
                 radius = getGaussianRadius((radius, radius))
                 radius = max(0, int(radius))
                 x, y = int(center[0]), int(center[1])
-                height, width = depthMap.shape[1:3]
-                left, right = min(x, radius), min(width - x, radius + 1)
-                top, bottom = min(y, radius), min(height - y, radius + 1)
-                bbox = np.array([y - top, y + bottom, x - left, x + right])
+                left, right = min(x, radius), min(outputWidth - x, radius + 1)
+                top, bottom = min(y, radius), min(outputHeight - y, radius + 1)
+                box = [y - top, y + bottom, x - left, x + right]
 
-            bbox = np.round(bbox).astype(np.int32)
-            # Add depth, x velocity, and z velocity to depth map
-            depthMap[0, bbox[0] : bbox[1], bbox[2] : bbox[3]] = depth
-            depthMap[1, bbox[0] : bbox[1], bbox[2] : bbox[3]] = pc_3d[8, i]
-            depthMap[2, bbox[0] : bbox[1], bbox[2] : bbox[3]] = pc_3d[9, i]
+            else:
+                raise ValueError(f"Invalid PC_ROI_METHOD: {method}")
 
-        return pc_2d, pc_3d, depthMap
+            box = np.round(box).astype(np.int32)
+            depthMap = self.drawPcHeat(
+                depthMap, box, depth, maxDistance, isOneHot, pc_3d[:, i]
+            )
+
+        return transformedPoints, pc_3d, depthMap
 
     def transformPointCloud(
         self, pc_2d, transformMat, img_width, img_height, filter_out=True
@@ -840,14 +834,14 @@ class GenericDataset(torch.utils.data.Dataset):
         Transform 2D point cloud using transformation matrix
 
         Args:
-            pc_2d: 2D point cloud [x, y, d]
-            transformMat: transformation matrix
-            img_width: output image width
-            img_height: output image height
+            pc_2d: 2D point cloud # [x, y] (2, N) or [x, y, d] (3, N)
+            transformMat: transformation matrix (2, 3)
+            img_width(int): output image width
+            img_height(int): output image height
             filter_out: filter out points outside image
 
         Returns:
-            out: transformed points [x, y, d]
+            out: transformed points # [x, y] (2, N) or [x, y, d] (3, N)
             mask: filtered points
         """
         if pc_2d.shape[1] == 0:
@@ -878,59 +872,89 @@ class GenericDataset(torch.utils.data.Dataset):
 
         Args:
             img_info: image infomation
-            pc_3d: 3D point cloud in camera coordinate [x, y, z]
+            pc_3d: 3D point cloud in camera coordinate [x, y, z] (>=3, N)
             transMatInput: transformation matrix from origin image to input size
             transMatOutput: transformation matrix from input to output size
 
         Returns:
-            pillar_wh: width and height of the point cloud pillars [w, h]
+            pillar_wh: width and height of the point cloud pillars [w, h] (2, N)
         """
-        pillar_wh = np.zeros((2, pc_3d.shape[1]))
-        boxesInput2D = np.zeros((0, 8, 2))  # for debug plots
-        pillar_dims = self.config.DATASET.NUSCENES.PILLAR_DIMS
+        pillar_dims = self.config.DATASET.PILLAR_DIMS
+        boxesInput2D = None  # for debug
 
-        for i, center in enumerate(pc_3d[:3, :].T):
-            # Create a 3D pillar at pc location for the full-size image
-            boxOrigin3D = get3dBox(pillar_dims, center, 0.0)
-            boxOrigin2D = project3DPoints(boxOrigin3D, img_info["calib"]).T  # [2x8]
+        # for i, center in enumerate(pc_3d[:3, :].T):
+        centers = pc_3d[:3, :].T
+        B, K = 1, len(centers)
+        pillar_dims = np.array(pillar_dims).reshape(1, 1, 3)
+        pillar_dims = pillar_dims.repeat(K, 1)  # (B, K, 3)
 
-            # save the box for debug plots
-            if self.config.DEBUG:
-                boxInput2D, _ = self.transformPointCloud(
-                    boxOrigin2D,
-                    transMatInput,
-                    self.config.MODEL.INPUT_SIZE[1],
-                    self.config.MODEL.INPUT_SIZE[0],
-                    filter_out=False,
-                )
-                boxesInput2D = np.concatenate(
-                    (boxesInput2D, np.expand_dims(boxInput2D.T, 0)), 0
-                )
+        # Create a 3D pillar at pc location for the full-size image
+        centers = np.array(centers).reshape(B, K, 3)  # (B, K, 3)
+        boxOrigin3D = get3dBox(pillar_dims, centers, np.zeros((B, K)))  # (B, K, 8, 3)
+        calib = np.array(img_info["calib"]).reshape(1, 1, 3, 4)
+        calib = calib.repeat(K, 1)  # (B, K, 3, 4)
+        boxOrigin2D = project3DPoints(boxOrigin3D, calib)  # (B, K, 8, 2)
+        pointsOrigin2D = boxOrigin2D.reshape((-1, 2)).T  # (B, K, 8, 2) -> (2, B*K*8)
 
-            # transform points
-            boxOutput2D, _ = self.transformPointCloud(
-                boxOrigin2D,
-                transMatOutput,
-                self.config.MODEL.OUTPUT_SIZE[1],
-                self.config.MODEL.OUTPUT_SIZE[0],
-            )
+        # save the box for debug plots
+        if self.config.DEBUG:
+            pointsInput2D, _ = self.transformPointCloud(
+                pointsOrigin2D,
+                transMatInput,
+                self.config.MODEL.INPUT_SIZE[1],
+                self.config.MODEL.INPUT_SIZE[0],
+                filter_out=False,
+            )  # (2, B*K*8)
+            boxesInput2D = pointsInput2D.T.reshape(
+                (-1, 8, 2)
+            )  # (2, B*K*8) -> (B * K, 8, 2)
 
-            if boxOutput2D.shape[1] <= 1:
-                continue
+        # transform points
+        pointsOutput2D, _ = self.transformPointCloud(
+            pointsOrigin2D,
+            transMatOutput,
+            self.config.MODEL.OUTPUT_SIZE[1],
+            self.config.MODEL.OUTPUT_SIZE[0],
+            filter_out=False,
+        )  # (2, B*K*8)
 
-            # get the bounding box in [xyxy] format
-            bbox = [
-                np.min(boxOutput2D[0, :]),
-                np.min(boxOutput2D[1, :]),
-                np.max(boxOutput2D[0, :]),
-                np.max(boxOutput2D[1, :]),
-            ]
+        boxOutput2D = pointsOutput2D.T.reshape(
+            (B, -1, 8, 2)
+        )  # (2, B*K*8) -> (B, K, 8, 2)
 
-            # store height and width of the 2D box
-            pillar_wh[0, i] = bbox[2] - bbox[0]
-            pillar_wh[1, i] = bbox[3] - bbox[1]
+        # get the bounding box in [xyxy] format
+        bbox = np.stack(
+            [
+                np.min(boxOutput2D[:, :, :, 0], 2),
+                np.min(boxOutput2D[:, :, :, 1], 2),
+                np.max(boxOutput2D[:, :, :, 0], 2),
+                np.max(boxOutput2D[:, :, :, 1], 2),
+            ],
+            axis=-1,
+        )  # (B, K, 4)
+
+        # store height and width of the 2D box
+        # pillar_wh = np.zeros((2, pc_3d.shape[1]))
+        pillar_wh = np.concatenate(
+            [bbox[:, :, 2] - bbox[:, :, 0], bbox[:, :, 3] - bbox[:, :, 1]]
+        )
 
         return boxesInput2D, pillar_wh
+
+    @rank_zero_only
+    @safe_run
+    def logValidResult(self, logger, output_dir):
+        """
+        This function will log result from file to logger and console.
+
+        Args:
+            logger: logger object
+            output_dir: output directory
+
+        Returns:
+            None
+        """
+        raise NotImplementedError
 
     def debugPillar(
         self, img, pc_2d, transMatInput, transMatOutput, boxesInput2D, pillar_wh
@@ -981,7 +1005,7 @@ class GenericDataset(torch.utils.data.Dataset):
             flags=cv2.INTER_LINEAR,
         )
 
-        originMask = np.zeros(imgOrigin.shape[:2], np.uint8)
+        originMask = np.ones((*imgOrigin.shape[:2], 3), np.uint8) * 255
         imgOverlayInput = imgInput2D.copy()
         imgOverlayOrigin = img.copy()
 
@@ -997,10 +1021,15 @@ class GenericDataset(torch.utils.data.Dataset):
         # pillarOutputWh = pillar_wh
         pillarOriginWh = pillarInputWh * 2
 
+        colors = cv2.applyColorMap(
+            ((pcInput[:, 2] / 60) * 255).astype(np.uint8),
+            cv2.COLORMAP_JET,
+        )
         for i in range(len(pcInput) - 1, -1, -1):
             point = pcInput[i]
-            color = int((point[2] / 60.0) * 255)
-            color = (0, color, 0)
+            # color = int((point[2] / self.config.DATASET.MAX_PC_DIST) * 255)
+            # color = (0, color, 0)
+            color = colors[i, 0].tolist()
 
             # Draw pillar box on input image
             pillarTopLInput = (
@@ -1038,10 +1067,14 @@ class GenericDataset(torch.utils.data.Dataset):
             )
 
             # Draw pillar box on blank image
-            originMask[
-                pillarTopLOrigin[1] : pillarBotROrigin[1],
-                pillarTopLOrigin[0] : pillarBotROrigin[0],
-            ] = color[1]
+            cv2.rectangle(
+                originMask,
+                pillarTopLOrigin,
+                pillarBotROrigin,
+                color,
+                -1,
+                lineType=cv2.LINE_AA,
+            )
 
             # plot 3d pillars
             imgInput3D = draw3DBox(
@@ -1090,7 +1123,115 @@ class GenericDataset(torch.utils.data.Dataset):
         outputFunc(f"{dirHead}imgOrigin.jpg", img)
         self.imgDebugIndex += 1 if outputFunc != cv2.imshow else 0
 
-        key = cv2.waitKey(0)
+        key = cv2.waitKey(1)
         if key == 27:
             cv2.destroyAllWindows()
             exit()
+
+    @staticmethod
+    def getDemoInstance(args):
+        raise NotImplementedError
+
+
+class GenericDemo:
+    TIME_STATS = [
+        "total",
+        "load",
+        "preprocess",
+        "net",
+        "decode",
+        "postprocess",
+        "merge",
+        "display",
+    ]
+
+    def __init__(self, args):
+        from detector import Detector
+        from dataset import getDataset
+
+        if args.sample is not None and args.max > 0:
+            warnings.warn("Scene demo will be ignored when sample is specified.")
+
+        time_str = time.strftime("%Y-%m-%d-%H-%M")
+        self.output_dir = Path("output") / "Demo" / time_str
+        createFolder(self.output_dir, parents=True, exist_ok=True)
+        dataset = getDataset(config.DATASET.DATASET)
+        updateDatasetAndModelConfig(config, dataset, str(self.output_dir))
+        self.detector = Detector(config, show=False, pause=False)
+        self.detector.visualization = args.save or not args.not_show
+        self.args = args
+        self.writer = {}
+        self.fps = None
+        self.averageFps = AverageMeter()
+        self.frameTimeStats = {stat: AverageMeter() for stat in self.TIME_STATS}
+
+    def run(self, args):
+        raise NotImplementedError
+
+    def initWriter(self, **outputSizes):
+        # Release previous writer
+        for key in self.writer:
+            if self.writer[key] is not None:
+                self.writer[key].release()
+        self.writer.clear()
+
+        # Create new writer
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        for key, shape in outputSizes.items():
+            self.writer[key] = cv2.VideoWriter(
+                os.path.join(self.output_dir, f"demo_{key}.mp4"),
+                fourcc,
+                self.fps,
+                shape,
+            )
+
+    def updateTimeBar(self, modelRet):
+        """
+        Update the output time bar with the time statistics.
+
+        Args:
+            modelRet: the output of the detector
+
+        Returns:
+            None
+        """
+        time_str = "InferenceTime: "
+        for stat in self.TIME_STATS:
+            self.frameTimeStats[stat].update(modelRet[stat])
+            time_str = time_str + "{} {:.3f}s | ".format(
+                stat, self.frameTimeStats[stat].avg
+            )
+        self.averageFps.update(1 / modelRet["total"])
+        time_str += f" {self.averageFps.avg:.1f}fps"
+        print(time_str, end="\r", flush=True)
+
+    def showAttention(self, depthmaps, allCamImages, allPcHmOut):
+        """
+        Show attention maps overlay on the original image.
+        Currently support only single camera image.
+
+        Args:
+            depthmaps:  dictionary containing the attention maps
+                        get from the model output ret["depthmaps"]
+            allCamImages: the original image
+            allPcHmOut: the heatmap of the point cloud
+        """
+        if not self.args.show_attention:
+            return
+
+        if not self.args.single:
+            warnings.warn(
+                "Visualization of attention map currently not supported for multiple camera images."
+            )
+            return
+
+        for attHead in ["depth", "rotation", "velocity", "nuscenes_att"]:
+            for attKey in ["AttImg", "AttRadar"]:
+                attentionOutput = f"{attHead}{attKey}"
+                if attentionOutput in depthmaps:
+                    smallImage = cv2.resize(allCamImages, allPcHmOut.shape[1::-1])
+                    attMap = cv2.applyColorMap(
+                        depthmaps[attentionOutput][0], cv2.COLORMAP_JET
+                    )
+                    attMap = cv2.addWeighted(attMap, 0.5, smallImage, 1, 0)
+                    cv2.imshow(attentionOutput, attMap)

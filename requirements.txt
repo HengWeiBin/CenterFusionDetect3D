@@ -1,0 +1,12 @@
+yacs
+numpy
+pycocotools
+opencv-python
+tqdm
+nuscenes-devkit
+pyquaternion
+wandb
+fvcore
+thop
+colorama
+pypcd4

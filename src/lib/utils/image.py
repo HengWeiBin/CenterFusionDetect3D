@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import torch
-from torchvision.transforms import ColorJitter, Normalize, Lambda, Compose, RandomOrder
 
 
 def get3rdPoint(a, b):
@@ -89,15 +88,24 @@ def affineTransform(points, transformMat):
     Applies an affine transformation to a set of points.
 
     Args:
-        point: The point to be transformed.
+        point: The point to be transformed. (N, 2)
         transformMat: The affine transformation matrix.
 
     Returns:
         The transformed points.
     """
-    newPoints = np.ones((points.shape[0], 3), dtype=np.float32)
+    if isinstance(points, torch.Tensor):
+        matmul = torch.mm
+        transformMat = torch.from_numpy(transformMat).to(points.device)
+        newPoints = torch.ones(
+            (points.shape[0], 3), dtype=torch.float32, device=points.device
+        )
+    else:
+        matmul = np.dot
+        newPoints = np.ones((points.shape[0], 3), dtype=np.float32)
+
     newPoints[:, :2] = points
-    newPoints = np.dot(transformMat, newPoints.T).T
+    newPoints = matmul(transformMat, newPoints.T).T
     return newPoints[:, :2]
 
 
@@ -168,14 +176,14 @@ def getGaussianRadius(det_size, min_overlap=0.7):
     return min(r1, r2, r3)
 
 
-def getGaussianMatrix(shape, sigma=1.):
+def getGaussianMatrix(shape, sigma=1.0):
     """
     Generate a 2D Gaussian kernel matrix.
-    
+
     Args:
         shape (tuple): The shape of the desired Gaussian kernel matrix (rows, columns).
         sigma (float): Standard deviation of the Gaussian distribution. Default is 1.
-        
+
     Returns:
         ndarray: A 2D NumPy array representing the Gaussian kernel matrix.
     """
@@ -184,6 +192,30 @@ def getGaussianMatrix(shape, sigma=1.):
     h = np.exp(-(x * x + y * y) / (2 * sigma * sigma))
     h[h < np.finfo(h.dtype).eps * h.max()] = 0
     return h
+
+
+def ellip_gaussian2D(shape, sigma_x, sigma_y):
+    """
+    Code from https://github.com/zhangyp15/MonoFlex/blob/main/model/heatmap_coder.py#L83
+    Generate a 2D Gaussian kernel matrix.
+
+    Args:
+        shape (tuple): The shape of the desired Gaussian kernel matrix (rows, columns).
+        sigma_x (float): Standard deviation of the Gaussian distribution in the x-direction.
+        sigma_y (float): Standard deviation of the Gaussian distribution in the y-direction.
+
+    Returns:
+        ndarray: A 2D NumPy array representing the Gaussian kernel matrix.
+    """
+    m, n = [(ss - 1.0) / 2.0 for ss in shape]
+    y, x = np.ogrid[-m : m + 1, -n : n + 1]
+
+    # generate meshgrid
+    h = np.exp(-(x * x) / (2 * sigma_x * sigma_x) - (y * y) / (2 * sigma_y * sigma_y))
+    h[h < np.finfo(h.dtype).eps * h.max()] = 0
+
+    return h
+
 
 def drawGaussianHeatRegion(heatmap, center, radius, k=1):
     """
@@ -198,18 +230,25 @@ def drawGaussianHeatRegion(heatmap, center, radius, k=1):
     Returns:
         The heatmap with the Gaussian kernel drawn on it.
     """
-    diameter = 2 * radius + 1
-    gaussian = getGaussianMatrix((diameter, diameter), sigma=diameter / 6)
+    if isinstance(radius, int):
+        diameter = 2 * radius + 1
+        gaussian = getGaussianMatrix((diameter, diameter), sigma=diameter / 6)
+        radius = [radius, radius]
+    elif isinstance(radius, (tuple, list)):
+        diameter_x, diameter_y = 2 * radius[0] + 1, 2 * radius[1] + 1
+        gaussian = ellip_gaussian2D(
+            (diameter_y, diameter_x), sigma_x=diameter_x / 6, sigma_y=diameter_y / 6
+        )
 
     x, y = int(center[0]), int(center[1])
     height, width = heatmap.shape[:2]
 
-    left, right = min(x, radius), min(width - x, radius + 1)
-    top, bottom = min(y, radius), min(height - y, radius + 1)
+    left, right = min(x, radius[0]), min(width - x, radius[0] + 1)
+    top, bottom = min(y, radius[1]), min(height - y, radius[1] + 1)
 
     masked_heatmap = heatmap[y - top : y + bottom, x - left : x + right]
     masked_gaussian = gaussian[
-        radius - top : radius + bottom, radius - left : radius + right
+        radius[1] - top : radius[1] + bottom, radius[0] - left : radius[0] + right
     ]
     if min(masked_gaussian.shape) > 0 and min(masked_heatmap.shape) > 0:
         np.maximum(masked_heatmap, masked_gaussian * k, out=masked_heatmap)

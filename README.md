@@ -25,10 +25,21 @@
 - [Dataset Preparation](#dataset-preparation)
 - [Pretrained Models](#pretrained-models)
 - [Training](#training)
+- [Evaluation](#evaluation)
+- [Demo](#demo)
 - [References](#references)
 - [License](#license)
 
 ## What's new
+### v2.0.0
+- Improved traning **Performance** with new AI training framework: PyTorch Lightning
+- Added **Demo** script for visualization of the results
+- Added **Inference** script for evaluation of the pure vision model
+- Fixed unused parameters problem of DLA-34
+- Added **DDP** support for multi-GPU training
+- More **readable**, **cleaner** and **faster** code
+
+### v1.0.1
 - **Compatible with old model** 
 - Added tqdm for **better visualization** of training, validation and evaluation
 - Improved **readability** of code **significantly**
@@ -66,31 +77,34 @@ We focus on the problem of radar and camera sensor fusion and propose a middle-f
 
 The code has been tested on WSL 2 Ubuntu 22.04.2 with Python 3.9.17, CUDA 12.2 and PyTorch 2.0.1. For installation, follow these steps:
 
-1. Create a new virtual environment (optional):
+1. Clone this repository with the `--recursive` option. We'll call the directory that you cloned this repo into `CF_ROOT`:
     ```bash
-    conda create --name centerfusion python=3.9
-    ```
-
-2. Install [PyTorch](https://pytorch.org/):
-    ```bash
-    conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
-    ```
-
-3. Install [COCOAPI](https://github.com/cocodataset/coco):
-    ```bash
-    pip install cython; pip install -U 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'
-    ```
-
-4. Clone the CenterFusion repository with the `--recursive` option. We'll call the directory that you cloned CenterFusion into `CF_ROOT`:
-    ```bash
-    CF_ROOT=/path/to/CenterFusion
+    CF_ROOT=</path/to/RepositoryFolder>
     git clone --recursive https://github.com/HengWeiBin/CenterFusionDetect3D $CF_ROOT
     ```
 
-5. Install the requirements:
+2. Create a new virtual environment (optional):
+    ```bash
+    conda create --name centerfusion python=3.9
+    conda activate centerfusion
+    ```
+
+3. Install [PyTorch](https://pytorch.org/):
+    ```bash
+    conda install lightning pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+    ```
+
+4. Install other requirements:
    ```bash
    cd $CF_ROOT
    pip install -r requirements.txt
+   sudo apt-get update && sudo apt-get install ffmpeg libsm6 libxext6  -y
+   
+   # Required by nuScenes dataset evaluation
+   cd $CF_ROOT/src
+   git clone https://github.com/nutonomy/nuscenes-devkit
+   
+   cd $CF_ROOT
    ```
 
 ## Dataset Preparation
@@ -140,21 +154,69 @@ The pre-trained CenterFusion model and the baseline CenterNet model can be downl
   |-------------|---------|-------|-----|-----|------|--------|-----------|
   | [centerfusion_e60](https://drive.google.com/uc?export=download&id=1XaYx7JJJmQ6TBjCJJster-Z7ERyqu4Ig) | 60 |  2x Nvidia Quadro P5000 | DLA | 0.453 | 0.332 | 0.449 | 0.326 |
   | [centernet_baseline_e170](https://drive.google.com/uc?export=download&id=1iFF7a5oueFfB5GnUoHFDnntFdTst-bVI) | 170 |  2x Nvidia Quadro P5000 | DLA | 0.328 | 0.306 | - | - |
-  | [centerfusion_e230](https://github.com/HengWeiBin/CenterFusionDetect3D/releases/download/v1.0.1/centerfusion_e230.pt) | 230 | 4x Nvidia RTX A6000 | DLA | 0.445 | 0.312 | - | - |
-  | [centernet_baseline_e170](https://github.com/HengWeiBin/CenterFusionDetect3D/releases/download/v1.0.1/centernet_baseline_e170.pt) | 170 | 4x Nvidia RTX A6000 | DLA | 0.321 | 0.296 | - | - |
-  
+  | [centerfusion_e230](https://github.com/HengWeiBin/CenterFusionDetect3D/releases/download/v2.0.0/centerfusion_e230.pt) | 230 | 4x Nvidia RTX A6000 | DLA | 0.445 | 0.312 | - | - |
+  | [centernet_baseline_e170](https://github.com/HengWeiBin/CenterFusionDetect3D/releases/download/v2.0.0/centernet_baseline_e170.pt) | 170 | 4x Nvidia RTX A6000 | DLA | 0.321 | 0.296 | - | - |
   **Notes:**
   - The *centernet_baseline_e170* model is obtained by starting from the original CenterNet 3D detection model ([nuScenes_3Ddetection_e140](https://github.com/xingyizhou/CenterTrack/blob/master/readme/MODEL_ZOO.md)) and training the velocity and attributes heads for 30 epochs. 
 
 ## Training
-The `$CF_ROOT/src/train.py` script can be used to train the network:
 
-  ```bash
-  cd $CF_ROOT
-  python src/main.py --cfg configs/centerfusion_full.yaml
-  ```
+1. Prepare a configuration file for training. You can use the default configuration files in `$CF_ROOT/configs/` or create a new one. All the information about the configuration file can be found in `$CF_ROOT/src/lib/config/default.py`.
 
-The `TRAIN_SPLIT` parameter determines the training set, which could be `mini_train` or `train`. the `LOAD_DIR` parameter can be set to continue training from a pretrained model, or removed to start training from scratch. You can modify the parameters in the script as needed, or add more supported parameters from `$CF_ROOT/src/lib/config/default.py`.
+2. The `$CF_ROOT/src/main.py` script can be used to train the network:
+    ```bash
+    cd $CF_ROOT
+    # In this example, we use centerfusion_debug.yaml as the configuration file
+    python src/main.py --cfg configs/centerfusion_debug.yaml
+    ```
+
+## Evaluation
+
+1. To evaluate the model, use its' configuration file and modify the `EVAL` section to `true`.
+
+2. Run the `$CF_ROOT/src/main.py` script same as training:
+    ```bash
+    cd $CF_ROOT
+    # In this example, we use centerfusion_debug.yaml as the configuration file
+    python src/main.py --cfg configs/centerfusion_debug.yaml
+    ```
+
+## Demo
+
+1. To run the demo of dataset, modify the `DATASET` section in the configuration file to correct dataset, and ensure the demo split is contained or same as the training split.
+
+2. Run the `$CF_ROOT/src/demo.py` script:
+    ```bash
+    cd $CF_ROOT
+    # In this example, we use centerfusion_debug.yaml as the configuration file
+    python src/demo.py --cfg configs/centerfusion_debug.yaml --split val
+    ```
+    It will demo the first sample of the validation split by default.
+
+3. To control the sample of the demo, add the `--min` or `--max` argument:
+    ```bash
+    cd $CF_ROOT
+    # In this example, we assume inference on the first 10 samples of the validation split
+    python src/demo.py --cfg configs/centerfusion_debug.yaml --split val --min 0 --max 10
+    ```
+
+4. To disable the visualization, add the `--not-show` argument, this will only accumulate the inference time without presenting the results:
+    ```bash
+    cd $CF_ROOT
+    python src/demo.py --cfg configs/centerfusion_debug.yaml --split val --not-show
+    ```
+
+5. To save the visualization, add the `--save` argument, this will save the visualization to the `output/Demo` defined in the configuration file:
+    ```bash
+    cd $CF_ROOT
+    python src/demo.py --cfg configs/centerfusion_debug.yaml --split val --save
+    ```
+
+6. If you just want to see single cam result, add the `--single` argument:
+    ```bash
+    cd $CF_ROOT
+    python src/demo.py --cfg configs/centerfusion_debug.yaml --single
+    ```
 
 ## References
 The following works have been used by CenterFusion:
@@ -162,24 +224,24 @@ The following works have been used by CenterFusion:
   ~~~
 
   @inproceedings{zhou2019objects,
-  title={Objects as Points},
-  author={Zhou, Xingyi and Wang, Dequan and Kr{\"a}henb{\"u}hl, Philipp},
-  booktitle={arXiv preprint arXiv:1904.07850},
-  year={2019}
+    title={Objects as Points},
+    author={Zhou, Xingyi and Wang, Dequan and Kr{\"a}henb{\"u}hl, Philipp},
+    booktitle={arXiv preprint arXiv:1904.07850},
+    year={2019}
   }
 
   @article{zhou2020tracking,
-  title={Tracking Objects as Points},
-  author={Zhou, Xingyi and Koltun, Vladlen and Kr{\"a}henb{\"u}hl, Philipp},
-  journal={ECCV},
-  year={2020}
+    title={Tracking Objects as Points},
+    author={Zhou, Xingyi and Koltun, Vladlen and Kr{\"a}henb{\"u}hl, Philipp},
+    journal={ECCV},
+    year={2020}
   }
 
   @inproceedings{nuscenes2019,
-  title={{nuScenes}: A multimodal dataset for autonomous driving},
-  author={Holger Caesar and Varun Bankiti and Alex H. Lang and Sourabh Vora and Venice Erin Liong and Qiang Xu and Anush Krishnan and Yu Pan and Giancarlo Baldan and Oscar Beijbom},
-  booktitle={CVPR},
-  year={2020}
+    title={{nuScenes}: A multimodal dataset for autonomous driving},
+    author={Holger Caesar and Varun Bankiti and Alex H. Lang and Sourabh Vora and Venice Erin Liong and Qiang Xu and Anush Krishnan and Yu Pan and Giancarlo Baldan and Oscar Beijbom},
+    booktitle={CVPR},
+    year={2020}
   }
   ~~~
 

@@ -1,0 +1,87 @@
+NAME: CenterFusion_Middle
+CUDNN:
+  BENCHMARK: true
+  DETERMINISTIC: false
+  ENABLED: true
+GPUS:
+- 0
+- 1
+- 2
+- 3
+WORKERS: 16
+DEBUG: 0
+EVAL: false
+RANDOM_SEED: 0
+MIXED_PRECISION: false
+CONF_THRESH: 0.3
+WANDB_RESUME: false
+WANDB_RESUBMIT : false
+
+DATASET:
+  DATASET: 'nuscenes'
+  ROOT: data/
+  RANDOM_CROP: false
+  MAX_CROP: true
+  SHIFT: 0.2
+  SCALE: 0
+  ROTATE: 0
+  FLIP: 0.5
+  COLOR_AUG: true
+  TRAIN_SPLIT: 'train'
+  VAL_SPLIT: 'val'
+  RADAR_PC: true
+  MAX_PC: 1000
+  MAX_PC_DIST: 60.0
+  PC_Z_OFFSET: 0.0
+  PC_ROI_METHOD: 'pillars'
+  PILLAR_DIMS: (1.5, 0.2, 0.2)
+  ONE_HOT_PC: false
+  DECOUPLE_REP: false
+  HEATMAP_REP: 2d
+
+MODEL:
+  LOAD_DIR: "models/CenterNetDla34Nusc_de140.pt"
+  ARCH: "dla_34"
+  FREEZE_BACKBONE: false
+  NORM_EVAL: false
+  NORM_2D: false
+  FUSION_STRATEGY: 'middle'
+  DEFREEZE: 170
+  INPUT_SIZE: (448, 800)
+  FRUSTUM: true
+  K: 100
+  DLA:
+    NODE: "DeformConv"
+
+LOSS_WEIGHTS:
+  HEATMAP: 1.0
+  AMODAL_OFFSET: 1.0
+  DIMENSION_2D: 0.1
+  DEPTH: 1.0
+  DIMENSION_3D: 1.0
+  ROTATION: 1.0
+  NUSCENES_ATT: 1.0
+  VELOCITY: 1.0
+  BBOX_2D: 0.0
+  BBOX_3D: 0.0
+  LIDAR_DEPTH: 0.0
+  RADAR_DEPTH: 0.0
+
+TRAIN:
+  BATCH_SIZE: 64
+  SHUFFLE: true
+  EPOCHS: 200
+  RESUME: true
+  WARM_EPOCHS: 0
+  OPTIMIZER: adam
+  LR: 5e-5
+  LR_STEP: (185, 195)
+  LR_SCHEDULER: StepLR
+  SAVE_INTERVALS: 10
+  VAL_INTERVALS: 10
+  SCALE_FACTOR: 16
+  UNCERTAINTY_LOSS: false
+
+TEST:
+  BATCH_SIZE: 64
+  OFFICIAL_EVAL: false

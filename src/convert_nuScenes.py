@@ -8,15 +8,22 @@ import json
 import numpy as np
 import cv2
 import copy
+import pickle
+from multiprocessing import Pool
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.geometry_utils import BoxVisibility, transform_matrix
 from nuscenes.eval.detection.utils import category_to_detection_name
 from pyquaternion import Quaternion
 
 import _init_paths
+from utils.pointcloud import RadarPointCloudWithVelocity as RadarPointCloud
 from utils.ddd import get3dBox, project3DPoints, draw3DBox, project2DTo3D
 from nuScenes_lib.utils_radar import map_pointcloud_to_image
 from nuScenes_lib.utils_kitti import KittiDB
+from nuscenes.utils.data_classes import LidarPointCloud
+
+
+DEBUG = False
 
 SPLITS = {
     "mini_val": "v1.0-mini",
@@ -26,7 +33,6 @@ SPLITS = {
     "test": "v1.0-test",
 }
 
-DEBUG = False
 CATS = [
     "car",
     "truck",
@@ -74,6 +80,8 @@ RADARS_FOR_CAMERA = {
 
 DATA_PATH = os.path.join("data", "nuscenes")
 OUT_PATH = os.path.join(DATA_PATH, "annotations")
+RADAR_PATH = os.path.join(OUT_PATH, "radar_pc")
+LIDAR_PATH = os.path.join(OUT_PATH, "lidar_pc")
 
 CAT_IDS = {v: i + 1 for i, v in enumerate(CATS)}
 
@@ -115,280 +123,354 @@ ATTRIBUTE_TO_ID = {
 }
 
 
+def exportBySplit(split):
+    nusc = NuScenes(version=SPLITS[split], dataroot=DATA_PATH, verbose=True)
+    out_path = os.path.join(OUT_PATH, f"{split}.json")
+    categories_info = [{"name": CATS[i], "id": i + 1} for i in range(len(CATS))]
+    ret = {
+        "images": [],
+        "annotations": [],
+        "categories": categories_info,
+        "videos": [],
+        "attributes": ATTRIBUTE_TO_ID,
+        "pointclouds": [],
+    }
+    num_images = 0
+    num_anns = 0
+    num_videos = 0
+
+    # A "sample" in nuScenes refers to a timestamp with 6 cameras and 1 LIDAR.
+    for sample in nusc.sample:
+        scene_name = nusc.get("scene", sample["scene_token"])["name"]
+        if not (split in ["test"]) and not (scene_name in SCENE_SPLITS[split]):
+            continue
+        if sample["prev"] == "":
+            print("scene_name", scene_name)
+            num_videos += 1
+            ret["videos"].append({"id": num_videos, "file_name": scene_name})
+            frame_ids = {k: 0 for k in sample["data"]}
+            track_ids = {}
+        # We decompose a sample into 6 images in our case.
+        for sensor_name in sample["data"]:
+            if sensor_name not in USED_SENSOR:
+                continue
+
+            image_token = sample["data"][sensor_name]
+            image_data = nusc.get("sample_data", image_token)
+            num_images += 1
+
+            if sample["prev"] == "":
+                prev_id = num_images
+            else:
+                prev_id = num_images - len(USED_SENSOR)
+
+            # Complex coordinate transform. This will take time to understand.
+            cs_record = nusc.get(
+                "calibrated_sensor", image_data["calibrated_sensor_token"]
+            )
+            pose_record = nusc.get("ego_pose", image_data["ego_pose_token"])
+            global_from_car = transform_matrix(
+                pose_record["translation"],
+                Quaternion(pose_record["rotation"]),
+                inverse=False,
+            )
+            car_from_sensor = transform_matrix(
+                cs_record["translation"],
+                Quaternion(cs_record["rotation"]),
+                inverse=False,
+            )
+            trans_matrix = np.dot(global_from_car, car_from_sensor)
+
+            vel_global_from_car = transform_matrix(
+                np.array([0, 0, 0]),
+                Quaternion(pose_record["rotation"]),
+                inverse=False,
+            )
+            vel_car_from_sensor = transform_matrix(
+                np.array([0, 0, 0]),
+                Quaternion(cs_record["rotation"]),
+                inverse=False,
+            )
+            velocity_trans_matrix = np.dot(vel_global_from_car, vel_car_from_sensor)
+
+            _, boxes, camera_intrinsic = nusc.get_sample_data(
+                image_token, box_vis_level=BoxVisibility.ANY
+            )
+            calib = np.eye(4, dtype=np.float32)
+            calib[:3, :3] = camera_intrinsic
+            calib = calib[:3]
+            frame_ids[sensor_name] += 1
+
+            # get radar pointclouds
+            all_radar_pcs = RadarPointCloud(np.zeros((18, 0)))
+            for radar_channel in RADARS_FOR_CAMERA[sensor_name]:
+                radar_pcs, _ = RadarPointCloud.from_file_multisweep(
+                    nusc, sample, radar_channel, sensor_name, 6
+                )
+                all_radar_pcs.points = np.hstack(
+                    (all_radar_pcs.points, radar_pcs.points)
+                )
+            radar_pcs_file = os.path.join(
+                RADAR_PATH, sensor_name, f"{sample['token']}.bin"
+            )
+
+            # get lidar pointclouds
+            lidar_pcs, _ = LidarPointCloud.from_file_multisweep(
+                nusc, sample, "LIDAR_TOP", sensor_name, 1
+            )
+            lidar_pcs, _, _ = map_pointcloud_to_image(
+                lidar_pcs.points, camera_intrinsic
+            )
+            lidar_pcs_file = os.path.join(
+                LIDAR_PATH, sensor_name, f"{sample['token']}.bin"
+            )
+
+            # image information in COCO format
+            image_info = {
+                "id": num_images,
+                "prev_id": prev_id,
+                "file_name": image_data["filename"],
+                "calib": calib.tolist(),
+                "video_id": num_videos,
+                "frame_id": frame_ids[sensor_name],
+                "sensor_id": SENSOR_ID[sensor_name],
+                "sample_token": sample["token"],
+                "trans_matrix": trans_matrix.tolist(),
+                "velocity_trans_matrix": velocity_trans_matrix.tolist(),
+                "width": image_data["width"],
+                "height": image_data["height"],
+                "pose_record_trans": pose_record["translation"],
+                "pose_record_rot": pose_record["rotation"],
+                "cs_record_trans": cs_record["translation"],
+                "cs_record_rot": cs_record["rotation"],
+                "camera_intrinsic": camera_intrinsic.tolist(),
+                "radar_pcs_file": radar_pcs_file,
+            }
+            ret["images"].append(image_info)
+
+            if not DEBUG:
+                with open(radar_pcs_file, "wb") as f:
+                    pickle.dump(all_radar_pcs.points.tolist(), f)
+                with open(lidar_pcs_file, "wb") as f:
+                    pickle.dump(lidar_pcs.tolist(), f)
+
+            anns = []
+            for box in boxes:
+                det_name = category_to_detection_name(box.name)
+                if det_name is None:
+                    continue
+                num_anns += 1
+                v = np.dot(box.rotation_matrix, np.array([1, 0, 0]))
+                yaw = -np.arctan2(v[2], v[0])
+                box.translate(np.array([0, box.wlh[2] / 2, 0]))
+                category_id = CAT_IDS[det_name]
+
+                amodal_center = project3DPoints(
+                    np.array(
+                        [
+                            box.center[0],
+                            box.center[1] - box.wlh[2] / 2,
+                            box.center[2],
+                        ],
+                        np.float32,
+                    ).reshape(1, 1, 1, 3),
+                    calib.reshape((1, 1, *calib.shape)),
+                )[0, 0, 0].tolist()
+                sample_ann = nusc.get("sample_annotation", box.token)
+                instance_token = sample_ann["instance_token"]
+                if not (instance_token in track_ids):
+                    track_ids[instance_token] = len(track_ids) + 1
+                attribute_tokens = sample_ann["attribute_tokens"]
+                attributes = [
+                    nusc.get("attribute", att_token)["name"]
+                    for att_token in attribute_tokens
+                ]
+                att = "" if len(attributes) == 0 else attributes[0]
+                if len(attributes) > 1:
+                    print(attributes)
+                    import pdb
+
+                    pdb.set_trace()
+                track_id = track_ids[instance_token]
+                vel = nusc.box_velocity(box.token).tolist()  # global frame
+
+                # get velocity in camera coordinates
+                vel_cam = np.dot(
+                    np.linalg.inv(velocity_trans_matrix),
+                    np.array([vel[0], vel[1], vel[2], 0], np.float32),
+                ).tolist()
+
+                # instance information in COCO format
+                ann = {
+                    "id": num_anns,
+                    "image_id": num_images,
+                    "category_id": category_id,
+                    "dimension": [box.wlh[2], box.wlh[0], box.wlh[1]],
+                    "location": [box.center[0], box.center[1], box.center[2]],
+                    "depth": box.center[2],
+                    "occluded": (4 - int(sample_ann["visibility_token"])) / 4,
+                    "yaw": yaw,
+                    "amodal_center": amodal_center,
+                    "track_id": track_id,
+                    "attributes": ATTRIBUTE_TO_ID[att],
+                    "velocity": vel,
+                    "velocity_cam": vel_cam,
+                }
+
+                bbox = KittiDB.project_kitti_box_to_image(
+                    copy.deepcopy(box), camera_intrinsic, imsize=(1600, 900)
+                )
+                ann["truncated"] = int(
+                    amodal_center[0] < 0
+                    or amodal_center[0] >= image_info["width"]
+                    or amodal_center[1] < 0
+                    or amodal_center[1] >= image_info["height"]
+                )
+                alpha = _rot_y2alpha(
+                    yaw,
+                    (bbox[0] + bbox[2]) / 2,
+                    camera_intrinsic[0, 2],
+                    camera_intrinsic[0, 0],
+                )
+                ann["bbox"] = [
+                    bbox[0],
+                    bbox[1],
+                    bbox[2] - bbox[0],
+                    bbox[3] - bbox[1],
+                ]
+                ann["area"] = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                ann["alpha"] = alpha
+                anns.append(ann)
+
+            # Filter out bounding boxes those blocked by others.
+            visable_anns = []
+            for i in range(len(anns)):
+                vis = True
+                for j in range(len(anns)):
+                    if anns[i]["depth"] - min(anns[i]["dimension"]) / 2 > anns[j][
+                        "depth"
+                    ] + max(anns[j]["dimension"]) / 2 and _bbox_inside(
+                        anns[i]["bbox"], anns[j]["bbox"]
+                    ):
+                        vis = False
+                        break
+                if vis:
+                    visable_anns.append(anns[i])
+                    ret["annotations"].append(anns[i])
+
+            if DEBUG:
+                img_path = os.path.join(DATA_PATH, image_info["file_name"])
+                img = cv2.imread(img_path)
+                img_3d = img.copy()
+                img_pc = img.copy()
+
+                # plot radar point clouds
+                radar_pcs_file = image_info["radar_pcs_file"]
+                with open(radar_pcs_file, "rb") as f:
+                    radar_pcs = pickle.load(f)
+                radar_pcs = np.array(radar_pcs)
+                cam_intrinsic = np.array(image_info["calib"])[:, :3]
+                points, depth, _ = map_pointcloud_to_image(radar_pcs, cam_intrinsic)
+
+                # plot lidar point clouds
+                # lidar_pcs, _ = LidarPointCloud.from_file_multisweep(
+                #     nusc, sample, "LIDAR_TOP", sensor_name, 1
+                # )
+                # points, depth, _ = map_pointcloud_to_image(
+                #     lidar_pcs.points, camera_intrinsic
+                # )
+
+                depth /= 60
+                depth[depth > 1] = 1
+                depth = (depth * 255).astype(np.uint8)
+                depth = cv2.applyColorMap(depth, cv2.COLORMAP_JET).reshape(-1, 3)
+                for i, p in enumerate(points.T):
+                    img_pc = cv2.circle(
+                        img_pc, (int(p[0]), int(p[1])), 5, depth[i].tolist(), -1
+                    )
+
+                for ann in visable_anns:
+                    cv2.circle(
+                        img,
+                        (int(ann["amodal_center"][0]), int(ann["amodal_center"][1])),
+                        5,
+                        (0, 0, 255),
+                        -1,
+                    )
+                    bboxColor = (0, 255, 0)
+                    if ann["truncated"]:
+                        bboxColor = (0, 0, 255)
+                    bbox = ann["bbox"]
+                    cv2.rectangle(
+                        img,
+                        (int(bbox[0]), int(bbox[1])),
+                        (int(bbox[2] + bbox[0]), int(bbox[3] + bbox[1])),
+                        bboxColor,
+                        3,
+                        lineType=cv2.LINE_AA,
+                    )
+                    box_3d = get3dBox(
+                        np.array(ann["dimension"]).reshape(1, 1, 3),
+                        np.array(ann["location"]).reshape(1, 1, 3),
+                        np.array(ann["yaw"]).reshape(1, 1, 1),
+                    )
+                    box_3d_project = project3DPoints(box_3d, calib.reshape(1, 1, 3, 4))
+                    img_3d = draw3DBox(img_3d, box_3d_project.reshape(8, 2))
+
+                cv2.imshow("img", cv2.resize(img, (800, 450)))
+                cv2.imshow("img_3d", cv2.resize(img_3d, (800, 450)))
+                cv2.imshow("img_pc", cv2.resize(img_pc, (800, 450)))
+                key = cv2.waitKey(0)
+                if key == 27:
+                    cv2.destroyAllWindows()
+                    exit()
+
+                # cv2.imwrite("img.jpg", img)
+                # cv2.imwrite("img_3d.jpg", img_3d)
+                # nusc.render_sample_data(image_token, out_path="nusc_img.jpg")
+                # plt.show()
+
+    print("reordering images")
+    images = ret["images"]
+    video_sensor_to_images = {}
+    for image_info in images:
+        tmp_seq_id = image_info["video_id"] * 20 + image_info["sensor_id"]
+        if tmp_seq_id in video_sensor_to_images:
+            video_sensor_to_images[tmp_seq_id].append(image_info)
+        else:
+            video_sensor_to_images[tmp_seq_id] = [image_info]
+    ret["images"] = []
+    for tmp_seq_id in sorted(video_sensor_to_images):
+        ret["images"] = ret["images"] + video_sensor_to_images[tmp_seq_id]
+
+    print(
+        "{} {} images {} boxes".format(
+            split, len(ret["images"]), len(ret["annotations"])
+        )
+    )
+    print("out_path", out_path)
+
+    if not DEBUG:
+        json.dump(ret, open(out_path, "w"))
+
+
 def main():
     if not os.path.exists(OUT_PATH):
         os.mkdir(OUT_PATH)
-    for split in SPLITS:
-        nusc = NuScenes(version=SPLITS[split], dataroot=DATA_PATH, verbose=True)
-        out_path = os.path.join(OUT_PATH, f"{split}.json")
-        categories_info = [{"name": CATS[i], "id": i + 1} for i in range(len(CATS))]
-        ret = {
-            "images": [],
-            "annotations": [],
-            "categories": categories_info,
-            "videos": [],
-            "attributes": ATTRIBUTE_TO_ID,
-            "pointclouds": [],
-        }
-        num_images = 0
-        num_anns = 0
-        num_videos = 0
+    if not os.path.exists(RADAR_PATH):
+        os.mkdir(RADAR_PATH)
+        for cam in RADARS_FOR_CAMERA.keys():
+            os.mkdir(os.path.join(RADAR_PATH, cam))
+    if not os.path.exists(LIDAR_PATH):
+        os.mkdir(LIDAR_PATH)
+        for cam in RADARS_FOR_CAMERA.keys():
+            os.mkdir(os.path.join(LIDAR_PATH, cam))
 
-        # A "sample" in nuScenes refers to a timestamp with 6 cameras and 1 LIDAR.
-        for sample in nusc.sample:
-            scene_name = nusc.get("scene", sample["scene_token"])["name"]
-            if not (split in ["test"]) and not (scene_name in SCENE_SPLITS[split]):
-                continue
-            if sample["prev"] == "":
-                print("scene_name", scene_name)
-                num_videos += 1
-                ret["videos"].append({"id": num_videos, "file_name": scene_name})
-                frame_ids = {k: 0 for k in sample["data"]}
-                track_ids = {}
-            # We decompose a sample into 6 images in our case.
-            for sensor_name in sample["data"]:
-                if sensor_name in USED_SENSOR:
-                    image_token = sample["data"][sensor_name]
-                    image_data = nusc.get("sample_data", image_token)
-                    num_images += 1
-
-                    # Complex coordinate transform. This will take time to understand.
-                    sd_record = nusc.get("sample_data", image_token)
-                    cs_record = nusc.get(
-                        "calibrated_sensor", sd_record["calibrated_sensor_token"]
-                    )
-                    pose_record = nusc.get("ego_pose", sd_record["ego_pose_token"])
-                    global_from_car = transform_matrix(
-                        pose_record["translation"],
-                        Quaternion(pose_record["rotation"]),
-                        inverse=False,
-                    )
-                    car_from_sensor = transform_matrix(
-                        cs_record["translation"],
-                        Quaternion(cs_record["rotation"]),
-                        inverse=False,
-                    )
-                    trans_matrix = np.dot(global_from_car, car_from_sensor)
-
-                    vel_global_from_car = transform_matrix(
-                        np.array([0, 0, 0]),
-                        Quaternion(pose_record["rotation"]),
-                        inverse=False,
-                    )
-                    vel_car_from_sensor = transform_matrix(
-                        np.array([0, 0, 0]),
-                        Quaternion(cs_record["rotation"]),
-                        inverse=False,
-                    )
-                    velocity_trans_matrix = np.dot(
-                        vel_global_from_car, vel_car_from_sensor
-                    )
-
-                    _, boxes, camera_intrinsic = nusc.get_sample_data(
-                        image_token, box_vis_level=BoxVisibility.ANY
-                    )
-                    calib = np.eye(4, dtype=np.float32)
-                    calib[:3, :3] = camera_intrinsic
-                    calib = calib[:3]
-                    frame_ids[sensor_name] += 1
-
-                    # image information in COCO format
-                    image_info = {
-                        "id": num_images,
-                        "file_name": image_data["filename"],
-                        "calib": calib.tolist(),
-                        "video_id": num_videos,
-                        "frame_id": frame_ids[sensor_name],
-                        "sensor_id": SENSOR_ID[sensor_name],
-                        "sample_token": sample["token"],
-                        "trans_matrix": trans_matrix.tolist(),
-                        "velocity_trans_matrix": velocity_trans_matrix.tolist(),
-                        "width": sd_record["width"],
-                        "height": sd_record["height"],
-                        "pose_record_trans": pose_record["translation"],
-                        "pose_record_rot": pose_record["rotation"],
-                        "cs_record_trans": cs_record["translation"],
-                        "cs_record_rot": cs_record["rotation"],
-                        "camera_intrinsic": camera_intrinsic.tolist(),
-                    }
-                    ret["images"].append(image_info)
-
-                    anns = []
-                    for box in boxes:
-                        det_name = category_to_detection_name(box.name)
-                        if det_name is None:
-                            continue
-                        num_anns += 1
-                        v = np.dot(box.rotation_matrix, np.array([1, 0, 0]))
-                        yaw = -np.arctan2(v[2], v[0])
-                        box.translate(np.array([0, box.wlh[2] / 2, 0]))
-                        category_id = CAT_IDS[det_name]
-
-                        amodal_center = project3DPoints(
-                            np.array(
-                                [
-                                    box.center[0],
-                                    box.center[1] - box.wlh[2] / 2,
-                                    box.center[2],
-                                ],
-                                np.float32,
-                            ).reshape(1, 3),
-                            calib,
-                        )[0].tolist()
-                        sample_ann = nusc.get("sample_annotation", box.token)
-                        instance_token = sample_ann["instance_token"]
-                        if not (instance_token in track_ids):
-                            track_ids[instance_token] = len(track_ids) + 1
-                        attribute_tokens = sample_ann["attribute_tokens"]
-                        attributes = [
-                            nusc.get("attribute", att_token)["name"]
-                            for att_token in attribute_tokens
-                        ]
-                        att = "" if len(attributes) == 0 else attributes[0]
-                        if len(attributes) > 1:
-                            print(attributes)
-                            import pdb
-
-                            pdb.set_trace()
-                        track_id = track_ids[instance_token]
-                        vel = nusc.box_velocity(box.token).tolist()  # global frame
-
-                        # get velocity in camera coordinates
-                        vel_cam = np.dot(
-                            np.linalg.inv(velocity_trans_matrix),
-                            np.array([vel[0], vel[1], vel[2], 0], np.float32),
-                        ).tolist()
-
-                        # instance information in COCO format
-                        ann = {
-                            "id": num_anns,
-                            "image_id": num_images,
-                            "category_id": category_id,
-                            "dimension": [box.wlh[2], box.wlh[0], box.wlh[1]],
-                            "location": [box.center[0], box.center[1], box.center[2]],
-                            "depth": box.center[2],
-                            "occluded": 0,
-                            "truncated": 0,
-                            "yaw": yaw,
-                            "amodal_center": amodal_center,
-                            "iscrowd": 0,
-                            "track_id": track_id,
-                            "attributes": ATTRIBUTE_TO_ID[att],
-                            "velocity": vel,
-                            "velocity_cam": vel_cam,
-                        }
-
-                        bbox = KittiDB.project_kitti_box_to_image(
-                            copy.deepcopy(box), camera_intrinsic, imsize=(1600, 900)
-                        )
-                        alpha = _rot_y2alpha(
-                            yaw,
-                            (bbox[0] + bbox[2]) / 2,
-                            camera_intrinsic[0, 2],
-                            camera_intrinsic[0, 0],
-                        )
-                        ann["bbox"] = [
-                            bbox[0],
-                            bbox[1],
-                            bbox[2] - bbox[0],
-                            bbox[3] - bbox[1],
-                        ]
-                        ann["area"] = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-                        ann["alpha"] = alpha
-                        anns.append(ann)
-
-                    # Filter out bounding boxes outside the image
-                    visable_anns = []
-                    for i in range(len(anns)):
-                        vis = True
-                        for j in range(len(anns)):
-                            if anns[i]["depth"] - min(anns[i]["dimension"]) / 2 > anns[j][
-                                "depth"
-                            ] + max(anns[j]["dimension"]) / 2 and _bbox_inside(
-                                anns[i]["bbox"], anns[j]["bbox"]
-                            ):
-                                vis = False
-                                break
-                        if vis:
-                            visable_anns.append(anns[i])
-                        else:
-                            pass
-
-                    for ann in visable_anns:
-                        ret["annotations"].append(ann)
-
-                    if DEBUG:
-                        img_path = DATA_PATH + image_info["file_name"]
-                        img = cv2.imread(img_path)
-                        img_3d = img.copy()
-                        # plot radar point clouds
-                        pc = np.array(image_info["pc_3d"])
-                        cam_intrinsic = np.array(image_info["calib"])[:, :3]
-                        points, coloring, _ = map_pointcloud_to_image(pc, cam_intrinsic)
-                        for i, p in enumerate(points.T):
-                            img = cv2.circle(
-                                img, (int(p[0]), int(p[1])), 5, (255, 0, 0), -1
-                            )
-
-                        for ann in visable_anns:
-                            bbox = ann["bbox"]
-                            cv2.rectangle(
-                                img,
-                                (int(bbox[0]), int(bbox[1])),
-                                (int(bbox[2] + bbox[0]), int(bbox[3] + bbox[1])),
-                                (0, 0, 255),
-                                3,
-                                lineType=cv2.LINE_AA,
-                            )
-                            box_3d = get3dBox(
-                                ann["dimension"], ann["location"], ann["yaw"]
-                            )
-                            box_2d = project3DPoints(box_3d, calib)
-                            img_3d = draw3DBox(img_3d, box_2d)
-
-                            pt_3d = project2DTo3D(
-                                ann["amodal_center"], ann["depth"], calib
-                            )
-                            pt_3d[1] += ann["dimension"][0] / 2
-                            print("location", ann["location"])
-                            print("loc model", pt_3d)
-                            pt_2d = np.array(
-                                [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2],
-                                dtype=np.float32,
-                            )
-                            pt_3d = project2DTo3D(pt_2d, ann["depth"], calib)
-                            pt_3d[1] += ann["dimension"][0] / 2
-                            print("loc      ", pt_3d)
-                        # cv2.imshow('img', img)
-                        # cv2.imshow('img_3d', img_3d)
-                        # cv2.waitKey()
-
-                        cv2.imwrite("img.jpg", img)
-                        cv2.imwrite("img_3d.jpg", img_3d)
-                        nusc.render_sample_data(image_token, out_path="nusc_img.jpg")
-                        input("press enter to continue")
-                        # plt.show()
-
-        print("reordering images")
-        images = ret["images"]
-        video_sensor_to_images = {}
-        for image_info in images:
-            tmp_seq_id = image_info["video_id"] * 20 + image_info["sensor_id"]
-            if tmp_seq_id in video_sensor_to_images:
-                video_sensor_to_images[tmp_seq_id].append(image_info)
-            else:
-                video_sensor_to_images[tmp_seq_id] = [image_info]
-        ret["images"] = []
-        for tmp_seq_id in sorted(video_sensor_to_images):
-            ret["images"] = ret["images"] + video_sensor_to_images[tmp_seq_id]
-
-        print(
-            "{} {} images {} boxes".format(
-                split, len(ret["images"]), len(ret["annotations"])
-            )
-        )
-        print("out_path", out_path)
-        json.dump(ret, open(out_path, "w"))
+    if DEBUG:
+        exportBySplit("mini_val")
+    else:
+        with Pool(max(8, len(SPLITS))) as p:
+            p.map(exportBySplit, SPLITS.keys())
 
 
 # Official train/ val split from
